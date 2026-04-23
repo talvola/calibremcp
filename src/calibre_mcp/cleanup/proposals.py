@@ -7,6 +7,7 @@ SQLAlchemy) so this module stays self-contained and easy to extract.
 from __future__ import annotations
 
 import sqlite3
+from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
@@ -182,6 +183,107 @@ def list_proposals(
     query += " ORDER BY id DESC LIMIT ?"
     params.append(limit)
     return list(conn.execute(query, params))
+
+
+def _build_filter_clauses(
+    *,
+    field: str | None = None,
+    status: str | None = None,
+    source: str | None = None,
+    ids: Sequence[int] | None = None,
+    min_confidence: float | None = None,
+    max_confidence: float | None = None,
+) -> tuple[str, list[Any]]:
+    """Assemble a WHERE-clause fragment (without the ``WHERE`` keyword) and
+    bound parameters from the given filters. Returns ``('1=1', [])`` when
+    no filters are supplied so the caller can concatenate safely."""
+    clauses: list[str] = []
+    params: list[Any] = []
+    if field is not None:
+        clauses.append("field = ?")
+        params.append(field)
+    if status is not None:
+        clauses.append("status = ?")
+        params.append(status)
+    if source is not None:
+        clauses.append("source = ?")
+        params.append(source)
+    if ids:
+        placeholders = ",".join(["?"] * len(ids))
+        clauses.append(f"id IN ({placeholders})")
+        params.extend(ids)
+    if min_confidence is not None:
+        clauses.append("confidence >= ?")
+        params.append(min_confidence)
+    if max_confidence is not None:
+        clauses.append("confidence <= ?")
+        params.append(max_confidence)
+    return (" AND ".join(clauses) if clauses else "1=1"), params
+
+
+def count_proposals(
+    conn: sqlite3.Connection,
+    *,
+    field: str | None = None,
+    status: str | None = None,
+    source: str | None = None,
+    ids: Sequence[int] | None = None,
+    min_confidence: float | None = None,
+    max_confidence: float | None = None,
+) -> int:
+    """Count proposals matching the filters. Used to preview bulk operations."""
+    where, params = _build_filter_clauses(
+        field=field,
+        status=status,
+        source=source,
+        ids=ids,
+        min_confidence=min_confidence,
+        max_confidence=max_confidence,
+    )
+    row = conn.execute(f"SELECT COUNT(*) AS n FROM proposals WHERE {where}", params).fetchone()  # noqa: S608 — {where} is a keyword-only fragment from _build_filter_clauses; values flow via bound params
+    return int(row["n"])
+
+
+def set_status_where(
+    conn: sqlite3.Connection,
+    new_status: str,
+    *,
+    notes: str | None = None,
+    field: str | None = None,
+    status: str | None = None,
+    source: str | None = None,
+    ids: Sequence[int] | None = None,
+    min_confidence: float | None = None,
+    max_confidence: float | None = None,
+) -> int:
+    """Bulk-update status for proposals matching filters. Returns rowcount.
+
+    ``notes`` is merged via COALESCE so callers can leave earlier notes
+    intact by passing None. Without any filter this refuses to run (would
+    update the entire table) — callers must pass at least one narrowing arg."""
+    if new_status not in _VALID_STATUSES:
+        raise ValueError(f"invalid status: {new_status!r}")
+    if all(v is None or v == [] for v in (field, status, source, ids, min_confidence, max_confidence)):
+        raise ValueError("refusing to update without any filter — pass at least one narrowing argument")
+    where, params = _build_filter_clauses(
+        field=field,
+        status=status,
+        source=source,
+        ids=ids,
+        min_confidence=min_confidence,
+        max_confidence=max_confidence,
+    )
+    cur = conn.execute(
+        f"""
+        UPDATE proposals
+        SET status      = ?,
+            reviewed_at = ?,
+            notes       = COALESCE(?, notes)
+        WHERE {where}
+        """,  # noqa: S608 — {where} is keyword-only from _build_filter_clauses; values bind as params
+        [new_status, datetime.now(UTC).isoformat(), notes, *params],
+    )
+    return cur.rowcount
 
 
 def set_status(

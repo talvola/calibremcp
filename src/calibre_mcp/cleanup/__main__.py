@@ -26,6 +26,7 @@ from pathlib import Path
 from rich.console import Console
 from rich.table import Table
 
+from calibre_mcp.cleanup import apply as apply_mod
 from calibre_mcp.cleanup import miner, proposals
 
 
@@ -44,6 +45,12 @@ def main(argv: list[str] | None = None) -> int:
         return _cmd_report(args)
     if args.cmd == "miner" and args.subcmd == "review":
         return _cmd_review(args)
+    if args.cmd == "miner" and args.subcmd == "approve":
+        return _cmd_set_status(args, "approved")
+    if args.cmd == "miner" and args.subcmd == "reject":
+        return _cmd_set_status(args, "rejected")
+    if args.cmd == "miner" and args.subcmd == "apply":
+        return _cmd_apply(args)
     parser.print_help()
     return 2
 
@@ -78,6 +85,53 @@ def _build_parser() -> argparse.ArgumentParser:
     review.add_argument("--status", default=None, help="Filter by status")
     review.add_argument("--source", default=None, help="Filter by source (default: any)")
     review.add_argument("--limit", type=int, default=25)
+
+    ap = msub.add_parser(
+        "apply",
+        help="Write approved proposals to Calibre via calibredb (dry-run by default)",
+    )
+    ap.add_argument("--proposals-db", type=Path, required=True)
+    ap.add_argument("--library-path", type=Path, required=True, help="Path calibredb should use for --library-path")
+    ap.add_argument("--execute", action="store_true", help="Actually run calibredb (default is dry-run)")
+    ap.add_argument("--field", default=None, help="Only apply proposals for this field")
+    ap.add_argument(
+        "--id",
+        type=int,
+        action="append",
+        dest="ids",
+        default=None,
+        help="Only apply specific proposal IDs (repeat for multiple)",
+    )
+    ap.add_argument(
+        "--limit", type=int, default=None, help="Stop after applying N commands (useful for a cautious first batch)"
+    )
+    ap.add_argument("--calibredb", default="calibredb", help="Path to calibredb binary (default: found on PATH)")
+
+    for verb, help_text in [
+        ("approve", "Mark matching proposals as approved (ready to apply)"),
+        ("reject", "Mark matching proposals as rejected (ignored by apply)"),
+    ]:
+        ap = msub.add_parser(verb, help=help_text)
+        ap.add_argument("--proposals-db", type=Path, required=True)
+        ap.add_argument(
+            "--id",
+            type=int,
+            action="append",
+            dest="ids",
+            default=None,
+            help="Specific proposal ID (repeat for multiple)",
+        )
+        ap.add_argument("--field", default=None, help="Filter by field")
+        ap.add_argument(
+            "--status",
+            default=None,
+            help="Filter by current status (default: 'proposed' for approve, any for reject)",
+        )
+        ap.add_argument("--source", default=None, help="Filter by source")
+        ap.add_argument("--min-confidence", type=float, default=None)
+        ap.add_argument("--max-confidence", type=float, default=None)
+        ap.add_argument("--notes", default=None, help="Reviewer note stored on the row")
+        ap.add_argument("--yes", "-y", action="store_true", help="Skip the count-and-confirm prompt")
 
     return parser
 
@@ -177,6 +231,113 @@ def _cmd_review(args: argparse.Namespace) -> int:
             f"{r['confidence']:.2f}",
         )
     console.print(table)
+    return 0
+
+
+def _cmd_apply(args: argparse.Namespace) -> int:
+    console = Console()
+    with proposals.connect(args.proposals_db) as conn:
+        skipped_summary = apply_mod.plan_report(conn)
+        commands = list(
+            apply_mod.plan(
+                conn,
+                library_path=args.library_path,
+                ids=args.ids,
+                field=args.field,
+                limit=args.limit,
+                calibredb=args.calibredb,
+            )
+        )
+
+        # Preview: count what'll run + what'll be skipped.
+        preview = Table(title="Apply plan")
+        preview.add_column("category")
+        preview.add_column("count", justify="right")
+        for key, n in sorted(skipped_summary.items()):
+            preview.add_row(key, str(n))
+        preview.add_row("[bold]commands to run (grouped by book)[/bold]", str(len(commands)))
+        console.print(preview)
+
+        if not commands:
+            console.print("[yellow]Nothing to apply.[/yellow]")
+            return 0
+
+        if not args.execute:
+            console.print("\n[bold]Dry-run — commands that WOULD run:[/bold]\n")
+            for cmd in commands[:20]:
+                console.print(f"  [dim]#{cmd.book_id}[/dim] {apply_mod.render(cmd)}")
+            if len(commands) > 20:
+                console.print(f"  [dim]... and {len(commands) - 20} more[/dim]")
+            console.print(
+                "\n[cyan]To actually apply, re-run with [bold]--execute[/bold]. "
+                "Runs calibredb once per book — expect ~0.5s each.[/cyan]"
+            )
+            return 0
+
+        # Real execution.
+        console.print(f"\n[bold]Executing {len(commands)} calibredb commands...[/bold]")
+        ok_count = fail_count = 0
+        for result in apply_mod.execute(conn, commands):
+            if result.ok:
+                ok_count += 1
+            else:
+                fail_count += 1
+                console.print(
+                    f"  [red]FAIL[/red] book=#{result.command.book_id} "
+                    f"rc={result.returncode} stderr={result.stderr.strip()!r}"
+                )
+        console.print(f"[green]Applied:[/green] {ok_count}  [red]Failed:[/red] {fail_count}")
+        return 0 if fail_count == 0 else 1
+
+
+def _cmd_set_status(args: argparse.Namespace, new_status: str) -> int:
+    """Shared implementation for ``approve`` and ``reject``."""
+    console = Console()
+    # For approve, default to status='proposed' if none given, so 'approve all
+    # fill-empty ISBN' is a one-liner. For reject, default to 'any' so the
+    # user can explicitly target conflicts.
+    status_filter = args.status
+    if status_filter is None and new_status == "approved":
+        status_filter = "proposed"
+
+    filter_kwargs = {
+        "field": args.field,
+        "status": status_filter,
+        "source": args.source,
+        "ids": args.ids,
+        "min_confidence": args.min_confidence,
+        "max_confidence": args.max_confidence,
+    }
+
+    # Refuse unfiltered bulk updates — the DB layer also guards, but give
+    # a friendlier message here.
+    if not any(filter_kwargs.values()):
+        console.print(
+            "[red]No filter specified.[/red] Pass --id, --field, --status, --source, or --min/max-confidence.",
+        )
+        return 2
+
+    with proposals.connect(args.proposals_db) as conn:
+        n = proposals.count_proposals(conn, **filter_kwargs)
+        if n == 0:
+            console.print("[yellow]No matching proposals.[/yellow]")
+            return 0
+        verb = "approve" if new_status == "approved" else "reject"
+        console.print(
+            f"[bold]{n}[/bold] proposals match (status → [cyan]{new_status}[/cyan])"
+            + (f' with note "{args.notes}"' if args.notes else "")
+        )
+        if not args.yes:
+            try:
+                reply = input(f"  {verb.capitalize()} them? [y/N] ").strip().lower()
+            except (KeyboardInterrupt, EOFError):
+                console.print("[yellow]Aborted.[/yellow]")
+                return 1
+            if reply not in {"y", "yes"}:
+                console.print("[yellow]Aborted.[/yellow]")
+                return 1
+        changed = proposals.set_status_where(conn, new_status, notes=args.notes, **filter_kwargs)
+        console.print(f"[green]{verb}d[/green] {changed} proposal(s).")
     return 0
 
 
