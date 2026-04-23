@@ -56,9 +56,7 @@ def _seed_mini_library(
 
 
 @pytest.mark.integration
-def test_miner_end_to_end(
-    tmp_path: Path, epub_samples_dir: Path, snapshot_db: Path
-) -> None:
+def test_miner_end_to_end(tmp_path: Path, epub_samples_dir: Path, snapshot_db: Path) -> None:
     library = tmp_path / "library"
     library.mkdir()
     metadata_db = tmp_path / "metadata.db"
@@ -70,8 +68,7 @@ def test_miner_end_to_end(
         metadata_db=metadata_db,
     )
     assert seeded >= 5, (
-        f"expected at least 5 sampled EPUBs to match the snapshot DB, got {seeded}. "
-        f"Samples in {epub_samples_dir}"
+        f"expected at least 5 sampled EPUBs to match the snapshot DB, got {seeded}. Samples in {epub_samples_dir}"
     )
 
     proposals_db = tmp_path / "proposals.db"
@@ -104,9 +101,7 @@ def test_miner_end_to_end(
 
 
 @pytest.mark.integration
-def test_dry_run_does_not_write(
-    tmp_path: Path, epub_samples_dir: Path, snapshot_db: Path
-) -> None:
+def test_dry_run_does_not_write(tmp_path: Path, epub_samples_dir: Path, snapshot_db: Path) -> None:
     library = tmp_path / "library"
     library.mkdir()
     metadata_db = tmp_path / "metadata.db"

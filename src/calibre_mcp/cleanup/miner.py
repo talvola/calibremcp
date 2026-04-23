@@ -28,6 +28,81 @@ SOURCE = "opf"
 # references — we never propose these as backfill.
 _INTERNAL_IDENTIFIER_SCHEMES = frozenset({"uuid", "calibre", "guid", "book-id", "bookid", "id", "epub", "urn"})
 
+# Non-ISBN identifier schemes we're willing to propose as backfill. Kept as
+# an allow-list rather than a deny-list because the noise is open-ended —
+# real-world OPFs include one-off junk like ``<dc:identifier opf:scheme=
+# "9780061743900">9780061743900</dc:identifier>`` (bare ISBN used as a
+# scheme name) that no deny-list can keep up with.
+_ALLOWED_IDENTIFIER_SCHEMES = frozenset(
+    {
+        "amazon",
+        "amazon_uk",
+        "amazon_de",
+        "amazon_fr",
+        "amazon_it",
+        "amazon_es",
+        "amazon_jp",
+        "asin",
+        "mobi-asin",
+        "mobi_asin",
+        "goodreads",
+        "google",
+        "google-books",
+        "google_books",
+        "gbooks",
+        "openlibrary",
+        "ol",
+        "isfdb",
+        "librarything",
+        "lt",
+        "fictiondb",
+        "barnesnoble",
+        "bn",
+        "kobo",
+        "sonybookid",
+        "sony",
+        "doi",
+        "ean",
+        "lccn",  # Library of Congress
+        "oclc",
+        "dnb",  # Deutsche Nationalbibliothek
+    }
+)
+
+# Tag values that are never worth proposing — useless generics and publisher
+# marketing copy that aren't genres. Observed polluting the top of the
+# tags.add distribution during the Phase 1 pilot run on Erik's library.
+_NOISE_TAG_VALUES = frozenset(
+    s.casefold()
+    for s in (
+        "fiction",
+        "nonfiction",
+        "non-fiction",
+        "non fiction",
+        "general",
+        "general fiction",
+        "general interest",
+        "unknown",
+        "adult",
+        "ebook",
+        "book",
+        "null",
+        "none",
+        # Publisher marketing copy (not genres):
+        "twists & turns",
+        "twists and turns",
+        "page-turner",
+        "page turner",
+        "intrigue",
+        "gripping",
+        "fast-paced",
+        "fast paced",
+        "suspenseful",
+        # Encoding noise:
+        "&#160;",
+    )
+)
+
 
 @dataclass(frozen=True, slots=True)
 class RunSummary:
@@ -64,6 +139,15 @@ def run(
         try:
             for book in calibre_reader.iter_books(cal, limit=sample):
                 books_scanned += 1
+                if books_scanned % 1000 == 0:
+                    log.info(
+                        "progress: scanned=%d with_epub=%d parsed=%d proposals=%d errors=%d",
+                        books_scanned,
+                        books_with_epub,
+                        books_parsed,
+                        emitted,
+                        errors,
+                    )
                 epub_path = _find_epub(library_root, book.path)
                 if epub_path is None:
                     continue
@@ -135,8 +219,10 @@ def _find_epub(library_root: Path, relative_path: str) -> Path | None:
 
 def _diff(book: calibre_reader.BookRecord, opf: opf_parser.OpfMetadata) -> Iterator[proposals.Proposal]:
     """Emit zero or more proposals comparing Calibre's book to the OPF metadata."""
-    # ISBN — canonical identifier, high-value backfill.
-    yield from _scalar("isbn", book.isbn, opf.isbn, book, confidence=1.0)
+    # ISBN — canonical identifier, high-value backfill. Use digit-only
+    # comparison so '978-1-59017-595-8' and '9781590175958' are recognised
+    # as the same ISBN rather than a formatting-noise conflict.
+    yield from _scalar("isbn", book.isbn, opf.isbn, book, confidence=1.0, equality=_isbn_equal)
 
     # Publisher, pubdate: lower-stakes but still valuable.
     yield from _scalar(
@@ -189,27 +275,39 @@ def _diff(book: calibre_reader.BookRecord, opf: opf_parser.OpfMetadata) -> Itera
             notes=f"series={opf.series!r}",
         )
 
-    # Tags — additive only. For each OPF subject not already present in Calibre's
-    # tags (case-insensitive), propose adding it. Confidence is lower because
-    # OPF subjects are noisy (BISAC categories, publisher feed residue).
+    # Tags — additive only. Suppress known-noise values (generic like 'Fiction',
+    # publisher marketing like 'Page-Turner', encoding junk) since they'd
+    # pollute Erik's curated vocabulary. Remaining proposals still need
+    # Phase 3 tag-normalization before they're applied.
     for subject in opf.subjects:
-        if subject.casefold() not in book.tags_ci:
-            yield proposals.Proposal(
-                book_id=book.id,
-                book_uuid=book.uuid,
-                field="tags.add",
-                calibre_value=None,
-                proposed_value=subject,
-                source=SOURCE,
-                confidence=0.6,
-            )
+        cf = subject.casefold()
+        if cf in _NOISE_TAG_VALUES:
+            continue
+        if cf in book.tags_ci:
+            continue
+        yield proposals.Proposal(
+            book_id=book.id,
+            book_uuid=book.uuid,
+            field="tags.add",
+            calibre_value=None,
+            proposed_value=subject,
+            source=SOURCE,
+            confidence=0.6,
+        )
 
     # Non-ISBN identifiers (amazon, goodreads, google, openlibrary, etc.) —
-    # additive per scheme. Skip Calibre/EPUB bookkeeping schemes.
+    # additive per scheme. Catch all ISBN-like schemes (``eisbn``, ``e-isbn``,
+    # ``isbn-paperback`` etc.) via the substring check so their values get
+    # routed through the ISBN pipeline rather than emitted as separate
+    # ``identifier.eisbn`` rows. Unknown schemes are skipped entirely —
+    # better to miss a rare valid source than to pollute the queue with
+    # garbage like ``identifier.9780061743900`` (bare-ISBN-as-scheme-name).
     for scheme, value in opf.identifiers.items():
-        if scheme in {"isbn", "isbn10", "isbn13", "isbn-10", "isbn-13"}:
-            continue  # handled above
+        if "isbn" in scheme:
+            continue  # covered by the ISBN picker above
         if scheme in _INTERNAL_IDENTIFIER_SCHEMES or scheme.startswith("urn"):
+            continue
+        if scheme not in _ALLOWED_IDENTIFIER_SCHEMES:
             continue
         field = f"identifier.{scheme}"
         if scheme in book.identifiers:
@@ -243,6 +341,21 @@ def _case_equal(a: str, b: str) -> bool:
 
 def _strict_equal(a: str, b: str) -> bool:
     return a.strip() == b.strip()
+
+
+def _isbn_equal(calibre_value: str, opf_value: str) -> bool:
+    """Compare ISBNs by digit content, ignoring dash/space formatting.
+
+    Calibre often stores ISBNs with dashes (``978-1-59017-595-8``) while the
+    OPF parser has already stripped them (``9781590175958``). These are the
+    same ISBN; flagging them as a conflict is noise.
+
+    Genuinely different ISBNs (including ISBN-10 vs ISBN-13 of the *same*
+    book — those share the root digits but not the check digit) remain
+    flagged so a human can decide which edition to keep."""
+    ca = opf_parser._isbn_digits(calibre_value)
+    cb = opf_parser._isbn_digits(opf_value)
+    return bool(ca and cb and ca == cb)
 
 
 def _calibre_richer_or_equal(calibre_value: str, opf_value: str) -> bool:

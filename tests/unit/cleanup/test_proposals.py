@@ -7,7 +7,7 @@ from pathlib import Path
 import pytest
 
 from calibre_mcp.cleanup import proposals
-from calibre_mcp.cleanup.miner import _calibre_richer_or_equal
+from calibre_mcp.cleanup.miner import _calibre_richer_or_equal, _isbn_equal
 from calibre_mcp.cleanup.proposals import Proposal
 
 
@@ -20,9 +20,10 @@ def db(tmp_path: Path):
 
 def _start_run(conn) -> int:
     return proposals.start_run(
-        conn, source="opf",
-        library_root=Path("/tmp/library"),
-        metadata_db_path=Path("/tmp/library/metadata.db"),
+        conn,
+        source="opf",
+        library_root=Path("/tmp/library"),  # noqa: S108 — dummy path stored as text; no file touched
+        metadata_db_path=Path("/tmp/library/metadata.db"),  # noqa: S108
         dry_run=False,
     )
 
@@ -35,8 +36,12 @@ def test_schema_created_and_empty(db) -> None:
 def test_insert_and_dedupe(db) -> None:
     run_id = _start_run(db)
     p = Proposal(
-        book_id=42, field="isbn", proposed_value="9780141036144",
-        source="opf", confidence=1.0, book_uuid="uuid-42",
+        book_id=42,
+        field="isbn",
+        proposed_value="9780141036144",
+        source="opf",
+        confidence=1.0,
+        book_uuid="uuid-42",
     )
     assert proposals.insert_proposal(db, run_id, p) is True
     # Same tuple a second time is a no-op — idempotent re-runs.
@@ -48,8 +53,11 @@ def test_insert_and_dedupe(db) -> None:
 def test_conflict_proposals_get_conflict_status(db) -> None:
     run_id = _start_run(db)
     p = Proposal(
-        book_id=1, field="isbn", proposed_value="9780141036144",
-        source="opf", confidence=1.0,
+        book_id=1,
+        field="isbn",
+        proposed_value="9780141036144",
+        source="opf",
+        confidence=1.0,
         calibre_value="9780000000000",
         conflict_reason="calibre has different ISBN",
     )
@@ -62,18 +70,39 @@ def test_conflict_proposals_get_conflict_status(db) -> None:
 
 def test_summary_counts_groups_by_field_and_status(db) -> None:
     run_id = _start_run(db)
-    proposals.insert_proposal(db, run_id, Proposal(
-        book_id=1, field="isbn", proposed_value="9780141036144",
-        source="opf", confidence=1.0,
-    ))
-    proposals.insert_proposal(db, run_id, Proposal(
-        book_id=2, field="isbn", proposed_value="9780000000007",
-        source="opf", confidence=1.0,
-    ))
-    proposals.insert_proposal(db, run_id, Proposal(
-        book_id=1, field="publisher", proposed_value="Penguin",
-        source="opf", confidence=0.9,
-    ))
+    proposals.insert_proposal(
+        db,
+        run_id,
+        Proposal(
+            book_id=1,
+            field="isbn",
+            proposed_value="9780141036144",
+            source="opf",
+            confidence=1.0,
+        ),
+    )
+    proposals.insert_proposal(
+        db,
+        run_id,
+        Proposal(
+            book_id=2,
+            field="isbn",
+            proposed_value="9780000000007",
+            source="opf",
+            confidence=1.0,
+        ),
+    )
+    proposals.insert_proposal(
+        db,
+        run_id,
+        Proposal(
+            book_id=1,
+            field="publisher",
+            proposed_value="Penguin",
+            source="opf",
+            confidence=0.9,
+        ),
+    )
     counts = proposals.summary_counts(db)
     assert counts == {
         "isbn": {"proposed": 2},
@@ -83,10 +112,17 @@ def test_summary_counts_groups_by_field_and_status(db) -> None:
 
 def test_set_status_updates_reviewed_at(db) -> None:
     run_id = _start_run(db)
-    proposals.insert_proposal(db, run_id, Proposal(
-        book_id=1, field="isbn", proposed_value="9780141036144",
-        source="opf", confidence=1.0,
-    ))
+    proposals.insert_proposal(
+        db,
+        run_id,
+        Proposal(
+            book_id=1,
+            field="isbn",
+            proposed_value="9780141036144",
+            source="opf",
+            confidence=1.0,
+        ),
+    )
     pid = proposals.list_proposals(db)[0]["id"]
     proposals.set_status(db, pid, "approved", notes="looks good")
     row = proposals.list_proposals(db, status="approved")[0]
@@ -100,20 +136,34 @@ def test_tags_add_multiple_rows_per_book(db) -> None:
     # multiple rows per (book, field, source) are allowed when values differ.
     run_id = _start_run(db)
     for tag in ("Science Fiction", "Space Opera", "Cthulhu"):
-        ok = proposals.insert_proposal(db, run_id, Proposal(
-            book_id=5, field="tags.add", proposed_value=tag,
-            source="opf", confidence=0.6,
-        ))
+        ok = proposals.insert_proposal(
+            db,
+            run_id,
+            Proposal(
+                book_id=5,
+                field="tags.add",
+                proposed_value=tag,
+                source="opf",
+                confidence=0.6,
+            ),
+        )
         assert ok is True
     assert len(proposals.list_proposals(db, field="tags.add")) == 3
 
 
 def test_invalid_status_rejected(db) -> None:
     run_id = _start_run(db)
-    proposals.insert_proposal(db, run_id, Proposal(
-        book_id=1, field="isbn", proposed_value="9780141036144",
-        source="opf", confidence=1.0,
-    ))
+    proposals.insert_proposal(
+        db,
+        run_id,
+        Proposal(
+            book_id=1,
+            field="isbn",
+            proposed_value="9780141036144",
+            source="opf",
+            confidence=1.0,
+        ),
+    )
     pid = proposals.list_proposals(db)[0]["id"]
     with pytest.raises(ValueError):
         proposals.set_status(db, pid, "fantastic")
@@ -123,33 +173,62 @@ def test_invalid_status_rejected(db) -> None:
     "calibre, opf, expected",
     [
         # Exact equality (case-insensitive) — not a conflict.
-        ("Penguin", "Penguin",                                True),
-        ("penguin", "Penguin",                                True),
+        ("Penguin", "Penguin", True),
+        ("penguin", "Penguin", True),
         # Calibre already subsumes the OPF value — not a conflict.
-        ("Scholastic Inc.", "Scholastic",                     True),
-        ("Star Wars: Rebel Force", "Rebel Force",             True),
-        ("Tor Books", "Tor",                                  True),
+        ("Scholastic Inc.", "Scholastic", True),
+        ("Star Wars: Rebel Force", "Rebel Force", True),
+        ("Tor Books", "Tor", True),
         # Real disagreement — should be flagged as conflict.
-        ("Penguin", "Random House",                           False),
-        ("Foundation", "Dune",                                False),
+        ("Penguin", "Random House", False),
+        ("Foundation", "Dune", False),
         # Too-short OPF token shouldn't trigger subsumption (guards against
         # e.g. matching 'NY' as if it were a meaningful publisher name).
-        ("Scholastic Inc.", "In",                             False),
+        ("Scholastic Inc.", "In", False),
         # Empty values treated as not-subsumed.
-        ("",  "Penguin",                                      False),
-        ("Penguin", "",                                       False),
+        ("", "Penguin", False),
+        ("Penguin", "", False),
     ],
 )
 def test_calibre_richer_or_equal(calibre: str, opf: str, expected: bool) -> None:
     assert _calibre_richer_or_equal(calibre, opf) is expected
 
 
+@pytest.mark.parametrize(
+    "calibre, opf, expected",
+    [
+        # Dashed vs bare — same ISBN, must NOT conflict.
+        ("978-1-59017-595-8", "9781590175958", True),
+        ("978 1 59017 595 8", "9781590175958", True),
+        ("0-141-03614-1", "0141036141", True),
+        # Exact match — equal.
+        ("9781590175958", "9781590175958", True),
+        # Different ISBNs (legitimate conflict — same book may have multiple
+        # editions, reviewer should pick).
+        ("9780141036144", "9780141036151", False),
+        ("0451220749", "9781101007594", False),
+        # A 'urn:uuid:...' accidentally stored in Calibre's isbn field is not
+        # an ISBN at all — should not match a real one.
+        ("urn:uuid:7655e3e8-a157-4775-89dd-b9f6408321bf", "9781250765055", False),
+        # Empty / missing sides.
+        ("", "9781590175958", False),
+        ("9781590175958", "", False),
+    ],
+)
+def test_isbn_equal(calibre: str, opf: str, expected: bool) -> None:
+    assert _isbn_equal(calibre, opf) is expected
+
+
 def test_miner_run_lifecycle(db) -> None:
     run_id = _start_run(db)
     proposals.finish_run(
-        db, run_id,
-        books_scanned=10, books_with_epub=9, books_parsed=9,
-        proposals_emitted=17, errors=0,
+        db,
+        run_id,
+        books_scanned=10,
+        books_with_epub=9,
+        books_parsed=9,
+        proposals_emitted=17,
+        errors=0,
     )
     row = db.execute("SELECT * FROM miner_runs WHERE id = ?", (run_id,)).fetchone()
     assert row["books_scanned"] == 10

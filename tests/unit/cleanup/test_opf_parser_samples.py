@@ -47,7 +47,10 @@ def test_at_least_one_sample_produces_real_publisher(epub_samples_dir: Path) -> 
         opf = parse_epub(f)
         if opf is not None and opf.publisher:
             assert opf.publisher.lower() not in {
-                "manybooks.net", "project gutenberg", "unknown", "gutenberg",
+                "manybooks.net",
+                "project gutenberg",
+                "unknown",
+                "gutenberg",
             }
             return
     pytest.fail("expected at least one OPF with a real publisher")
