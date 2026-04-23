@@ -51,6 +51,8 @@ def main(argv: list[str] | None = None) -> int:
         return _cmd_set_status(args, "rejected")
     if args.cmd == "miner" and args.subcmd == "apply":
         return _cmd_apply(args)
+    if args.cmd == "miner" and args.subcmd == "web":
+        return _cmd_web(args)
     parser.print_help()
     return 2
 
@@ -106,6 +108,17 @@ def _build_parser() -> argparse.ArgumentParser:
         "--limit", type=int, default=None, help="Stop after applying N commands (useful for a cautious first batch)"
     )
     ap.add_argument("--calibredb", default="calibredb", help="Path to calibredb binary (default: found on PATH)")
+
+    web = msub.add_parser("web", help="Launch the proposal-review webapp")
+    web.add_argument("--proposals-db", type=Path, required=True)
+    web.add_argument(
+        "--calibre-db",
+        type=Path,
+        default=None,
+        help="Calibre metadata.db (optional — enables book title/author in the UI)",
+    )
+    web.add_argument("--host", default="127.0.0.1")
+    web.add_argument("--port", type=int, default=8090)
 
     for verb, help_text in [
         ("approve", "Mark matching proposals as approved (ready to apply)"),
@@ -231,6 +244,27 @@ def _cmd_review(args: argparse.Namespace) -> int:
             f"{r['confidence']:.2f}",
         )
     console.print(table)
+    return 0
+
+
+def _cmd_web(args: argparse.Namespace) -> int:
+    # Import lazily so the other CLI commands don't pay for uvicorn/FastAPI
+    # import time.
+    from calibre_mcp.cleanup import web as web_mod
+
+    console = Console()
+    console.print(
+        f"[bold]Cleanup review webapp[/bold]  "
+        f"[cyan]http://{args.host}:{args.port}[/cyan]  "
+        f"proposals=[yellow]{args.proposals_db}[/yellow]"
+        + (f"  calibre=[yellow]{args.calibre_db}[/yellow]" if args.calibre_db else "")
+    )
+    web_mod.serve(
+        proposals_db=args.proposals_db,
+        calibre_db=args.calibre_db,
+        host=args.host,
+        port=args.port,
+    )
     return 0
 
 
