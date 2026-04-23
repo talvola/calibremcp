@@ -115,6 +115,7 @@ calibre/
 # Logs and databases
 *.log
 *.sql
+!src/**/*.sql
 *.sqlite
 
 # Environment variables
@@ -246,7 +247,7 @@ docs-private/
 
 # Test files that should be in tests/ or scripts/ directories
 test_*.py
-!tests/test_*.py
+!tests/**/test_*.py
 !scripts/test_*.py
 
 # Scripts that should be in scripts/ directory
