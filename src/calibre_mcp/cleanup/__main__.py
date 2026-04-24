@@ -109,7 +109,9 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     ap.add_argument("--calibredb", default="calibredb", help="Path to calibredb binary (default: found on PATH)")
     ap.add_argument(
-        "--timeout", type=float, default=30.0,
+        "--timeout",
+        type=float,
+        default=30.0,
         help="Per-book calibredb timeout in seconds (default: 30; bump for slow CIFS moments)",
     )
 

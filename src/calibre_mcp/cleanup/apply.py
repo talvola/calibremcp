@@ -31,13 +31,25 @@ from calibre_mcp.cleanup import calibre_reader, proposals
 
 log = logging.getLogger(__name__)
 
-# Proposal fields whose backfill is a pure replacement — safe to apply
-# without reading Calibre's current state first. Deferred for Phase 3:
-#   - 'tags.add' (list merge)
-#   - 'identifier.*' (dict merge, except isbn which Calibre treats as scalar)
-_APPLICABLE_SCALAR_FIELDS: frozenset[str] = frozenset(
-    {"isbn", "publisher", "pubdate", "description", "series", "series_index"}
-)
+# Scalar-replacement fields: safe to overwrite without reading current state.
+# (ISBN is *not* in this set — although conceptually scalar, calibredb routes
+# it through the identifiers dict, which needs read-merge.)
+_APPLICABLE_SCALAR_FIELDS: frozenset[str] = frozenset({"publisher", "pubdate", "description", "series", "series_index"})
+
+# Identifier proposal fields route through the merged identifiers-dict path.
+# Phase 1 originally supported just 'isbn'; Phase 3a extends to any scheme
+# via the 'identifier.<scheme>' prefix convention.
+_IDENTIFIER_FIELDS: frozenset[str] = frozenset({"isbn"})
+
+
+def _is_applicable(field: str) -> bool:
+    """True for every proposal field the current apply pipeline can handle.
+
+    Includes all scalar fields, plus any ``identifier.<scheme>`` and the
+    top-level ``isbn`` pseudo-field (which gets translated into an
+    ``identifiers.isbn`` entry at apply time)."""
+    return field in _APPLICABLE_SCALAR_FIELDS or field in _IDENTIFIER_FIELDS or field.startswith("identifier.")
+
 
 # Proposal field -> calibredb --field name (they mostly match; the main
 # exception is 'description' which Calibre stores as 'comments').
@@ -85,19 +97,18 @@ def plan(
     calibredb: str = "calibredb",
 ) -> Iterator[ApplyCommand]:
     """Yield an ``ApplyCommand`` for every book with approved proposals in
-    applicable scalar fields.
+    applicable fields. Scalar fields (publisher, pubdate, description,
+    series, series_index) use direct ``--field=name:value``. ISBN and
+    ``identifier.<scheme>`` proposals are collected into a merged
+    identifiers dict — ``calibredb set_metadata`` only exposes identifiers
+    via ``--field identifiers:k1:v1,k2:v2`` which REPLACES the whole set,
+    so we read Calibre's current identifiers from metadata.db first and
+    merge in the approved additions to preserve any hand-added values.
 
-    ISBN is special: ``calibredb set_metadata`` doesn't expose a top-level
-    ``isbn`` field — you set it via ``--field identifiers:isbn:XXXX``, which
-    REPLACES the entire identifiers dict. So for any book with an approved
-    ISBN proposal we first read the book's current identifiers from
-    Calibre's metadata.db, merge in the new ISBN, and emit the full
-    dict-shaped argument. This preserves any hand-added identifiers
-    (goodreads, amazon, etc.) the user already has on the book.
-
-    Proposals for fields that still need merge logic but aren't yet
-    supported (tags.add, non-ISBN identifiers) are skipped — see
-    ``_APPLICABLE_SCALAR_FIELDS`` and ``plan_report``.
+    Still not supported and silently skipped: ``tags.add`` (list-merge
+    needs the same read-current-then-write-full treatment but against
+    the tags list rather than identifiers dict). See ``plan_report`` for
+    a count of what's applicable vs skipped in the current queue.
     """
     rows = proposals.list_proposals(
         conn,
@@ -112,7 +123,7 @@ def plan(
 
     by_book: dict[int, list[sqlite3.Row]] = defaultdict(list)
     for row in rows:
-        if row["field"] not in _APPLICABLE_SCALAR_FIELDS:
+        if not _is_applicable(row["field"]):
             continue
         by_book[row["book_id"]].append(row)
 
@@ -129,20 +140,28 @@ def plan(
         for book_id, book_rows in sorted(by_book.items()):
             argv: list[str] = [calibredb, "set_metadata", f"--library-path={library_path}"]
             fields_map: dict[str, str] = {}
-            new_isbn: str | None = None
+            identifier_updates: dict[str, str] = {}
 
             for row in book_rows:
-                if row["field"] == "isbn":
-                    new_isbn = row["proposed_value"]
-                    fields_map["isbn"] = new_isbn
-                    continue
-                calibre_field = _FIELD_ALIASES.get(row["field"], row["field"])
-                argv.append(f"--field={calibre_field}:{row['proposed_value']}")
-                fields_map[row["field"]] = row["proposed_value"]
+                field = row["field"]
+                value = row["proposed_value"]
+                fields_map[field] = value
 
-            if new_isbn is not None:
+                # Collect identifier additions into a dict — emitted as a
+                # single merged --field=identifiers:... below.
+                if field == "isbn":
+                    identifier_updates["isbn"] = value
+                elif field.startswith("identifier."):
+                    scheme = field.split(".", 1)[1]
+                    identifier_updates[scheme] = value
+                else:
+                    # Direct scalar: --field=<calibre_name>:<value>.
+                    calibre_field = _FIELD_ALIASES.get(field, field)
+                    argv.append(f"--field={calibre_field}:{value}")
+
+            if identifier_updates:
                 current = _current_identifiers(cal_conn, book_id) if cal_conn else {}
-                current["isbn"] = new_isbn
+                current.update(identifier_updates)
                 argv.append(f"--field=identifiers:{_format_identifiers(current)}")
 
             argv.append(str(book_id))
@@ -159,9 +178,7 @@ def plan(
 
 def _current_identifiers(cal_conn: sqlite3.Connection, book_id: int) -> dict[str, str]:
     """Read the current identifiers dict for a book from Calibre's DB."""
-    rows = cal_conn.execute(
-        "SELECT type, val FROM identifiers WHERE book = ?", (book_id,)
-    ).fetchall()
+    rows = cal_conn.execute("SELECT type, val FROM identifiers WHERE book = ?", (book_id,)).fetchall()
     out: dict[str, str] = {}
     for r in rows:
         scheme = (r["type"] or "").strip().lower()
@@ -180,12 +197,12 @@ def _format_identifiers(ids: dict[str, str]) -> str:
 def plan_report(conn: sqlite3.Connection) -> dict[str, int]:
     """Summary of what ``plan`` would emit vs skip, grouped by field.
 
-    Useful so the reviewer can see ``'tags.add: 1715 skipped (merge needed)'``
+    Useful so the reviewer can see ``'tags.add: 1674 skipped (merge needed)'``
     instead of silently dropping them."""
     out: dict[str, int] = {}
     for row in proposals.list_proposals(conn, status="approved", limit=1_000_000):
         key = row["field"]
-        if key not in _APPLICABLE_SCALAR_FIELDS:
+        if not _is_applicable(key):
             key = f"{key} (skipped: needs merge)"
         out[key] = out.get(key, 0) + 1
     return out

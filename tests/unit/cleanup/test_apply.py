@@ -78,14 +78,20 @@ def test_plan_groups_fields_per_book(db) -> None:
     assert "--field=pubdate:2014-11-10" in by_book[42].argv
 
 
-def test_plan_skips_non_scalar_fields(db) -> None:
+def test_plan_includes_identifier_fields_skips_tags(db) -> None:
     _seed(db, 1, "isbn", "9780141036144")
     _seed(db, 1, "tags.add", "Science Fiction")
     _seed(db, 1, "identifier.goodreads", "12345")
+    _seed(db, 1, "identifier.amazon", "B00XYZ1234")
     cmds = list(apply_mod.plan(db, library_path=Path("/lib")))
     assert len(cmds) == 1
-    # Only the ISBN proposal flows through; merge-needing fields deferred.
-    assert list(cmds[0].fields) == ["isbn"]
+    # Identifier.* proposals flow through (Phase 3a); tags.add still deferred.
+    assert set(cmds[0].fields) == {"isbn", "identifier.goodreads", "identifier.amazon"}
+    # All three identifier schemes should appear in the single merged
+    # --field=identifiers:... argument.
+    id_arg = next(a for a in cmds[0].argv if a.startswith("--field=identifiers:"))
+    payload = id_arg.removeprefix("--field=identifiers:")
+    assert payload == "amazon:B00XYZ1234,goodreads:12345,isbn:9780141036144"
 
 
 def test_plan_description_aliased_to_comments(db) -> None:
@@ -110,9 +116,11 @@ def test_plan_report_distinguishes_skipped(db) -> None:
     _seed(db, 2, "identifier.goodreads", "12345")
     report = apply_mod.plan_report(db)
     assert report["isbn"] == 1
+    # Phase 3a: identifier.* fields are applicable now.
+    assert report["identifier.goodreads"] == 1
+    # tags.add still deferred (Phase 3b — list-merge).
     assert "tags.add (skipped: needs merge)" in report
     assert report["tags.add (skipped: needs merge)"] == 2
-    assert "identifier.goodreads (skipped: needs merge)" in report
 
 
 def test_plan_respects_field_filter(db) -> None:
@@ -129,9 +137,7 @@ def test_plan_respects_id_filter(db) -> None:
     assert len(cmds) == 1 and cmds[0].book_id == 1
 
 
-def _make_calibre_db_with_identifiers(
-    library_path: Path, book_id: int, identifiers: dict[str, str]
-) -> None:
+def _make_calibre_db_with_identifiers(library_path: Path, book_id: int, identifiers: dict[str, str]) -> None:
     """Create a minimal ``metadata.db`` at ``library_path/metadata.db`` with
     just enough schema to satisfy the identifier-merge lookup."""
     library_path.mkdir(parents=True, exist_ok=True)
@@ -164,7 +170,8 @@ def test_plan_merges_existing_identifiers(tmp_path: Path, db) -> None:
     them — calibredb set_metadata replaces the whole identifiers dict."""
     library = tmp_path / "lib"
     _make_calibre_db_with_identifiers(
-        library, book_id=42,
+        library,
+        book_id=42,
         identifiers={"goodreads": "12345", "amazon": "B00XYZ1234"},
     )
     _seed(db, 42, "isbn", "9780141036144")
@@ -185,6 +192,58 @@ def test_plan_fill_empty_isbn_when_no_existing_identifiers(tmp_path: Path, db) -
     _seed(db, 42, "isbn", "9780141036144")
     cmd = next(apply_mod.plan(db, library_path=library))
     assert any("--field=identifiers:isbn:9780141036144" in a for a in cmd.argv)
+
+
+def test_plan_merges_new_goodreads_with_existing_isbn(tmp_path: Path, db) -> None:
+    """Phase 3a case: book already has an ISBN in Calibre (from Phase 1
+    apply), now we're adding an identifier.goodreads. The merge must
+    preserve the ISBN and add Goodreads alongside."""
+    library = tmp_path / "lib"
+    _make_calibre_db_with_identifiers(
+        library,
+        book_id=42,
+        identifiers={"isbn": "9780141036144"},
+    )
+    _seed(db, 42, "identifier.goodreads", "12345")
+
+    cmd = next(apply_mod.plan(db, library_path=library))
+    id_arg = next(a for a in cmd.argv if a.startswith("--field=identifiers:"))
+    payload = id_arg.removeprefix("--field=identifiers:")
+    assert payload == "goodreads:12345,isbn:9780141036144"
+
+
+def test_plan_single_book_multiple_identifier_schemes(tmp_path: Path, db) -> None:
+    """Real-world shape: one book with isbn + goodreads + amazon + google
+    all approved at once, merged into a single calibredb invocation."""
+    library = tmp_path / "lib"
+    _make_calibre_db_with_identifiers(library, book_id=99, identifiers={})
+    _seed(db, 99, "isbn", "9780141036144")
+    _seed(db, 99, "identifier.goodreads", "12345")
+    _seed(db, 99, "identifier.amazon", "B00XYZ1234")
+    _seed(db, 99, "identifier.google", "abcDEF")
+
+    cmds = list(apply_mod.plan(db, library_path=library))
+    # Still a single command for the one book — calibredb startup cost paid
+    # once even with four identifier additions.
+    assert len(cmds) == 1
+    id_arg = next(a for a in cmds[0].argv if a.startswith("--field=identifiers:"))
+    payload = id_arg.removeprefix("--field=identifiers:")
+    # Alphabetical: goodreads sorts before google (4th char: 'd' < 'g').
+    assert payload == "amazon:B00XYZ1234,goodreads:12345,google:abcDEF,isbn:9780141036144"
+
+
+def test_plan_identifier_only_no_scalar_proposals(tmp_path: Path, db) -> None:
+    """Book with *only* identifier.* proposals (no ISBN, no scalars) should
+    still produce exactly one calibredb command."""
+    library = tmp_path / "lib"
+    _make_calibre_db_with_identifiers(library, book_id=7, identifiers={})
+    _seed(db, 7, "identifier.goodreads", "99999")
+    cmds = list(apply_mod.plan(db, library_path=library))
+    assert len(cmds) == 1
+    assert any("--field=identifiers:goodreads:99999" in a for a in cmds[0].argv)
+    # Only the identifiers field, plus the book_id argument.
+    field_args = [a for a in cmds[0].argv if a.startswith("--field=")]
+    assert len(field_args) == 1
 
 
 # ---------------------------------------------------------------------------
