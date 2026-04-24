@@ -27,7 +27,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 
-from calibre_mcp.cleanup import proposals
+from calibre_mcp.cleanup import calibre_reader, proposals
 
 log = logging.getLogger(__name__)
 
@@ -87,9 +87,17 @@ def plan(
     """Yield an ``ApplyCommand`` for every book with approved proposals in
     applicable scalar fields.
 
-    Proposals for fields that need merge logic (tags.add, non-ISBN
-    identifiers) are silently skipped — see ``_APPLICABLE_SCALAR_FIELDS``.
-    Callers who want to see what was skipped should use ``plan_report``.
+    ISBN is special: ``calibredb set_metadata`` doesn't expose a top-level
+    ``isbn`` field — you set it via ``--field identifiers:isbn:XXXX``, which
+    REPLACES the entire identifiers dict. So for any book with an approved
+    ISBN proposal we first read the book's current identifiers from
+    Calibre's metadata.db, merge in the new ISBN, and emit the full
+    dict-shaped argument. This preserves any hand-added identifiers
+    (goodreads, amazon, etc.) the user already has on the book.
+
+    Proposals for fields that still need merge logic but aren't yet
+    supported (tags.add, non-ISBN identifiers) are skipped — see
+    ``_APPLICABLE_SCALAR_FIELDS`` and ``plan_report``.
     """
     rows = proposals.list_proposals(
         conn,
@@ -108,20 +116,65 @@ def plan(
             continue
         by_book[row["book_id"]].append(row)
 
-    for book_id, book_rows in sorted(by_book.items()):
-        argv: list[str] = [calibredb, "set_metadata", f"--library-path={library_path}"]
-        fields_map: dict[str, str] = {}
-        for row in book_rows:
-            calibre_field = _FIELD_ALIASES.get(row["field"], row["field"])
-            argv.append(f"--field={calibre_field}:{row['proposed_value']}")
-            fields_map[row["field"]] = row["proposed_value"]
-        argv.append(str(book_id))
-        yield ApplyCommand(
-            book_id=book_id,
-            proposal_ids=tuple(r["id"] for r in book_rows),
-            fields=fields_map,
-            argv=tuple(argv),
-        )
+    # Open Calibre's metadata.db read-only for the identifier merge lookup.
+    # If it isn't present (tests using synthetic library paths), the merge
+    # falls back to "no existing identifiers" — safe because the caller
+    # wouldn't actually be executing calibredb against that path anyway.
+    calibre_metadata_db = library_path / "metadata.db"
+    cal_conn: sqlite3.Connection | None = None
+    if calibre_metadata_db.exists():
+        cal_conn = calibre_reader.open_readonly(calibre_metadata_db)
+
+    try:
+        for book_id, book_rows in sorted(by_book.items()):
+            argv: list[str] = [calibredb, "set_metadata", f"--library-path={library_path}"]
+            fields_map: dict[str, str] = {}
+            new_isbn: str | None = None
+
+            for row in book_rows:
+                if row["field"] == "isbn":
+                    new_isbn = row["proposed_value"]
+                    fields_map["isbn"] = new_isbn
+                    continue
+                calibre_field = _FIELD_ALIASES.get(row["field"], row["field"])
+                argv.append(f"--field={calibre_field}:{row['proposed_value']}")
+                fields_map[row["field"]] = row["proposed_value"]
+
+            if new_isbn is not None:
+                current = _current_identifiers(cal_conn, book_id) if cal_conn else {}
+                current["isbn"] = new_isbn
+                argv.append(f"--field=identifiers:{_format_identifiers(current)}")
+
+            argv.append(str(book_id))
+            yield ApplyCommand(
+                book_id=book_id,
+                proposal_ids=tuple(r["id"] for r in book_rows),
+                fields=fields_map,
+                argv=tuple(argv),
+            )
+    finally:
+        if cal_conn is not None:
+            cal_conn.close()
+
+
+def _current_identifiers(cal_conn: sqlite3.Connection, book_id: int) -> dict[str, str]:
+    """Read the current identifiers dict for a book from Calibre's DB."""
+    rows = cal_conn.execute(
+        "SELECT type, val FROM identifiers WHERE book = ?", (book_id,)
+    ).fetchall()
+    out: dict[str, str] = {}
+    for r in rows:
+        scheme = (r["type"] or "").strip().lower()
+        value = (r["val"] or "").strip()
+        if scheme and value:
+            out[scheme] = value
+    return out
+
+
+def _format_identifiers(ids: dict[str, str]) -> str:
+    """Render an identifiers dict in calibredb's ``scheme1:val1,scheme2:val2``
+    form. Sorted for deterministic output."""
+    return ",".join(f"{k}:{v}" for k, v in sorted(ids.items()))
 
 
 def plan_report(conn: sqlite3.Connection) -> dict[str, int]:

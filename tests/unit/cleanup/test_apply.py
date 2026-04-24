@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import sqlite3
 import stat
 from pathlib import Path
 
@@ -70,6 +71,11 @@ def test_plan_groups_fields_per_book(db) -> None:
     assert by_book[42].argv[1] == "set_metadata"
     assert "--library-path=/lib" in by_book[42].argv
     assert str(42) == by_book[42].argv[-1]
+    # ISBN is emitted via the identifiers dict syntax (calibredb's only form).
+    assert any("--field=identifiers:isbn:9780141036144" in a for a in by_book[42].argv)
+    # Other scalars keep their direct --field=name:value syntax.
+    assert "--field=publisher:Penguin" in by_book[42].argv
+    assert "--field=pubdate:2014-11-10" in by_book[42].argv
 
 
 def test_plan_skips_non_scalar_fields(db) -> None:
@@ -123,6 +129,64 @@ def test_plan_respects_id_filter(db) -> None:
     assert len(cmds) == 1 and cmds[0].book_id == 1
 
 
+def _make_calibre_db_with_identifiers(
+    library_path: Path, book_id: int, identifiers: dict[str, str]
+) -> None:
+    """Create a minimal ``metadata.db`` at ``library_path/metadata.db`` with
+    just enough schema to satisfy the identifier-merge lookup."""
+    library_path.mkdir(parents=True, exist_ok=True)
+    db_path = library_path / "metadata.db"
+    conn = sqlite3.connect(db_path)
+    try:
+        conn.executescript(
+            """
+            CREATE TABLE identifiers (
+              id INTEGER PRIMARY KEY AUTOINCREMENT,
+              book INTEGER NOT NULL,
+              type TEXT NOT NULL,
+              val TEXT NOT NULL
+            );
+            """
+        )
+        for scheme, value in identifiers.items():
+            conn.execute(
+                "INSERT INTO identifiers (book, type, val) VALUES (?, ?, ?)",
+                (book_id, scheme, value),
+            )
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def test_plan_merges_existing_identifiers(tmp_path: Path, db) -> None:
+    """When Calibre already has other identifiers on a book (Erik's
+    hand-added goodreads IDs, Amazon ASINs, etc.), the merge must preserve
+    them — calibredb set_metadata replaces the whole identifiers dict."""
+    library = tmp_path / "lib"
+    _make_calibre_db_with_identifiers(
+        library, book_id=42,
+        identifiers={"goodreads": "12345", "amazon": "B00XYZ1234"},
+    )
+    _seed(db, 42, "isbn", "9780141036144")
+
+    cmd = next(apply_mod.plan(db, library_path=library))
+    # Find the --field=identifiers:... argument and verify it contains all three.
+    id_arg = next(a for a in cmd.argv if a.startswith("--field=identifiers:"))
+    payload = id_arg.removeprefix("--field=identifiers:")
+    # Keys are sorted alphabetically for determinism.
+    assert payload == "amazon:B00XYZ1234,goodreads:12345,isbn:9780141036144"
+
+
+def test_plan_fill_empty_isbn_when_no_existing_identifiers(tmp_path: Path, db) -> None:
+    """The happy path: book has no identifiers in Calibre, ISBN proposal
+    fills in cleanly."""
+    library = tmp_path / "lib"
+    _make_calibre_db_with_identifiers(library, book_id=42, identifiers={})
+    _seed(db, 42, "isbn", "9780141036144")
+    cmd = next(apply_mod.plan(db, library_path=library))
+    assert any("--field=identifiers:isbn:9780141036144" in a for a in cmd.argv)
+
+
 # ---------------------------------------------------------------------------
 # render()
 # ---------------------------------------------------------------------------
@@ -170,7 +234,7 @@ def test_execute_success_marks_applied(tmp_path: Path, db) -> None:
     # Verify our fake calibredb was actually invoked with the expected argv.
     log_content = (tmp_path / "calls.log").read_text()
     assert "set_metadata" in log_content
-    assert "--field=isbn:9780141036144" in log_content
+    assert "--field=identifiers:isbn:9780141036144" in log_content
     assert log_content.strip().splitlines()[-1] == "42"
 
 
