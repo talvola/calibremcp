@@ -215,6 +215,16 @@ def test_calibre_richer_or_equal(calibre: str, opf: str, expected: bool) -> None
         # A 'urn:uuid:...' accidentally stored in Calibre's isbn field is not
         # an ISBN at all — should not match a real one.
         ("urn:uuid:7655e3e8-a157-4775-89dd-b9f6408321bf", "9781250765055", False),
+        # ISBN-10 vs ISBN-13 of the *same* book — not a conflict.
+        # (1442497718 is the ISBN-10 for 9781442497719; 0141036141 for 9780141036144.)
+        ("9781442497719", "1442497718", True),
+        ("1442497718", "9781442497719", True),
+        ("9780141036144", "0141036141", True),
+        ("0141036141", "9780141036144", True),
+        # All-zero OPF value is now rejected by validation — must not silently
+        # equal anything real.
+        ("9780141036144", "0000000000", False),
+        ("9780141036144", "0000000000000", False),
         # Empty / missing sides.
         ("", "9781590175958", False),
         ("9781590175958", "", False),

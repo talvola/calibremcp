@@ -354,6 +354,10 @@ def _isbn_digits(raw: str) -> str | None:
 
 
 def _isbn_valid(digits: str) -> bool:
+    # All-zero ISBNs technically pass the checksum (0 mod 11 = 0, 0 mod 10 = 0)
+    # but are always placeholders in the wild, never real ISBNs.
+    if not digits or set(digits) <= {"0"}:
+        return False
     if len(digits) == 13:
         total = 0
         for i, ch in enumerate(digits):
@@ -367,3 +371,23 @@ def _isbn_valid(digits: str) -> bool:
             total += n * (10 - i)
         return total % 11 == 0
     return False
+
+
+def _isbn_to_13(digits: str) -> str | None:
+    """Convert a digits-only ISBN-10 to its ISBN-13 form, or return an ISBN-13
+    unchanged. Returns None if the input isn't a valid ISBN shape.
+
+    ISBN-13 = '978' + first 9 digits of the ISBN-10 + new EAN-13 check digit.
+    (The '979' prefix space exists but is reserved for different publishers,
+    so ISBN-10→13 conversion always goes through '978'.)
+    """
+    if not digits:
+        return None
+    if len(digits) == 13:
+        return digits
+    if len(digits) == 10:
+        body = "978" + digits[:9]
+        total = sum((3 if i % 2 else 1) * int(c) for i, c in enumerate(body))
+        check = (10 - total % 10) % 10
+        return body + str(check)
+    return None

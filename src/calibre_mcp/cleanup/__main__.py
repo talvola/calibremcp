@@ -371,7 +371,7 @@ def _cmd_set_status(args: argparse.Namespace, new_status: str) -> int:
                 console.print("[yellow]Aborted.[/yellow]")
                 return 1
         changed = proposals.set_status_where(conn, new_status, notes=args.notes, **filter_kwargs)
-        console.print(f"[green]{verb}d[/green] {changed} proposal(s).")
+        console.print(f"[green]{new_status}[/green] {changed} proposal(s).")
     return 0
 
 

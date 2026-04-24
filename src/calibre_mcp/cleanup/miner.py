@@ -367,18 +367,27 @@ def _strict_equal(a: str, b: str) -> bool:
 
 
 def _isbn_equal(calibre_value: str, opf_value: str) -> bool:
-    """Compare ISBNs by digit content, ignoring dash/space formatting.
+    """Compare ISBNs by canonical (ISBN-13) form.
 
-    Calibre often stores ISBNs with dashes (``978-1-59017-595-8``) while the
-    OPF parser has already stripped them (``9781590175958``). These are the
-    same ISBN; flagging them as a conflict is noise.
+    Handles three classes of superficial mismatch that aren't real conflicts:
+      - Dashed vs bare (``978-1-59017-595-8`` vs ``9781590175958``).
+      - ISBN-10 vs ISBN-13 of the *same* book (``1442497718`` vs
+        ``9781442497719``) — the 13-digit form is always ``978`` plus the
+        first 9 digits of the 10 plus a recomputed check digit.
+      - All-zero placeholder values — rejected before comparison, so an
+        all-zero OPF proposal never silently equals a real Calibre ISBN.
 
-    Genuinely different ISBNs (including ISBN-10 vs ISBN-13 of the *same*
-    book — those share the root digits but not the check digit) remain
-    flagged so a human can decide which edition to keep."""
+    Returns False when either side can't be normalized to a valid ISBN shape
+    (e.g. Calibre has a UUID accidentally stored in ``identifiers.isbn``)."""
     ca = opf_parser._isbn_digits(calibre_value)
     cb = opf_parser._isbn_digits(opf_value)
-    return bool(ca and cb and ca == cb)
+    if not ca or not cb:
+        return False
+    if ca == cb:
+        return True
+    na = opf_parser._isbn_to_13(ca)
+    nb = opf_parser._isbn_to_13(cb)
+    return bool(na and nb and na == nb)
 
 
 def _pubdate_richer_or_equal(calibre_value: str, opf_value: str) -> bool:

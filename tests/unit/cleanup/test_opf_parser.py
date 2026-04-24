@@ -12,6 +12,7 @@ import pytest
 from calibre_mcp.cleanup.opf_parser import (
     OpfMetadata,
     _isbn_digits,
+    _isbn_to_13,
     _isbn_valid,
     parse_opf_bytes,
 )
@@ -125,7 +126,25 @@ def test_isbn_valid_helper() -> None:
     assert _isbn_valid("9780141036144") is True
     assert _isbn_valid("0141036141") is True
     assert _isbn_valid("9780141036145") is False
-    assert _isbn_valid("0000000000") is True  # all zeros is a valid checksum; acceptable false positive
+    # All-zero strings technically pass the numeric checksum (0 mod 11 = 0,
+    # 0 mod 10 = 0) but are always placeholders in the wild — explicitly
+    # reject so a junk OPF value doesn't silently poison Calibre.
+    assert _isbn_valid("0000000000") is False
+    assert _isbn_valid("0000000000000") is False
+    assert _isbn_valid("") is False
+
+
+def test_isbn_to_13_helper() -> None:
+    # ISBN-10 to 13: '978' + first 9 of ISBN-10 + new check digit.
+    # Known conversion: 0141036141 → 9780141036144
+    assert _isbn_to_13("0141036141") == "9780141036144"
+    # Real-world pair from Erik's library review: 1442497718 ↔ 9781442497719
+    assert _isbn_to_13("1442497718") == "9781442497719"
+    # 13-digit input returns unchanged.
+    assert _isbn_to_13("9780141036144") == "9780141036144"
+    # Invalid shapes: return None.
+    assert _isbn_to_13("12345") is None
+    assert _isbn_to_13("") is None
 
 
 # ---------------------------------------------------------------------------
