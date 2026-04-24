@@ -14,6 +14,7 @@ disagreements land as ``status='conflict'`` for explicit review.
 from __future__ import annotations
 
 import logging
+import re
 from collections.abc import Callable, Iterator
 from dataclasses import dataclass
 from pathlib import Path
@@ -23,6 +24,13 @@ from calibre_mcp.cleanup import calibre_reader, opf_parser, proposals
 log = logging.getLogger(__name__)
 
 SOURCE = "opf"
+
+# BISAC subject codes — publisher-industry taxonomy like 'FIC045000'
+# (Fiction / Action & Adventure). Machine-readable but opaque to humans,
+# and mixing them into a user's genre vocabulary is pure noise. Drop at
+# emission; a future Phase-3 tag pipeline can translate them back to
+# human-readable form if we ever want to.
+_BISAC_CODE_RE = re.compile(r"^[A-Z]{3}\d{6}$")
 
 # Identifier schemes that are Calibre/EPUB bookkeeping, not real catalog
 # references — we never propose these as backfill.
@@ -233,7 +241,17 @@ def _diff(book: calibre_reader.BookRecord, opf: opf_parser.OpfMetadata) -> Itera
         confidence=0.9,
         equality=_calibre_richer_or_equal,
     )
-    yield from _scalar("pubdate", book.pubdate, opf.pubdate, book, confidence=0.9)
+    # Pubdate — if Calibre already has a more precise date (same year or
+    # year-month as OPF, plus additional day/month), Calibre wins. Only
+    # flag as conflict when the values genuinely disagree.
+    yield from _scalar(
+        "pubdate",
+        book.pubdate,
+        opf.pubdate,
+        book,
+        confidence=0.9,
+        equality=_pubdate_richer_or_equal,
+    )
 
     # Description: only fill if Calibre has none. Never conflict-overwrite — if
     # the user wrote a custom description, we don't second-guess it.
@@ -282,6 +300,11 @@ def _diff(book: calibre_reader.BookRecord, opf: opf_parser.OpfMetadata) -> Itera
     for subject in opf.subjects:
         cf = subject.casefold()
         if cf in _NOISE_TAG_VALUES:
+            continue
+        if _BISAC_CODE_RE.match(subject.strip()):
+            # BISAC subject codes are opaque publisher-industry taxonomy.
+            # Dropped unconditionally; Phase 3 can revisit with a lookup
+            # table if we ever want the human-readable translations.
             continue
         if cf in book.tags_ci:
             continue
@@ -356,6 +379,28 @@ def _isbn_equal(calibre_value: str, opf_value: str) -> bool:
     ca = opf_parser._isbn_digits(calibre_value)
     cb = opf_parser._isbn_digits(opf_value)
     return bool(ca and cb and ca == cb)
+
+
+def _pubdate_richer_or_equal(calibre_value: str, opf_value: str) -> bool:
+    """Treat Calibre's pubdate as 'already good enough' when it's a
+    prefix-extension of the OPF's (more precise, same known parts).
+
+      - calibre='2025-11-11', opf='2025'       → True  (calibre adds month+day)
+      - calibre='2025-11',    opf='2025'       → True  (calibre adds month)
+      - calibre='2025',       opf='2025-11-11' → False (OPF is richer — upgrade)
+      - calibre='2024',       opf='2025'       → False (real disagreement)
+      - calibre='2025-11-11', opf='2025-11-11' → True  (equal)
+    """
+    a = calibre_value.strip()
+    b = opf_value.strip()
+    if not a or not b:
+        return False
+    # Use dash-terminated prefix check so '2025' doesn't spuriously match '2025-11-11'
+    # when the shorter value is on Calibre's side (we handle that via equality check).
+    if a == b:
+        return True
+    # Calibre value is longer and begins with OPF value followed by the date separator.
+    return a.startswith(b + "-")
 
 
 def _calibre_richer_or_equal(calibre_value: str, opf_value: str) -> bool:

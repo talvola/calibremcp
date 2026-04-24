@@ -7,7 +7,12 @@ from pathlib import Path
 import pytest
 
 from calibre_mcp.cleanup import proposals
-from calibre_mcp.cleanup.miner import _calibre_richer_or_equal, _isbn_equal
+from calibre_mcp.cleanup.miner import (
+    _BISAC_CODE_RE,
+    _calibre_richer_or_equal,
+    _isbn_equal,
+    _pubdate_richer_or_equal,
+)
 from calibre_mcp.cleanup.proposals import Proposal
 
 
@@ -217,6 +222,61 @@ def test_calibre_richer_or_equal(calibre: str, opf: str, expected: bool) -> None
 )
 def test_isbn_equal(calibre: str, opf: str, expected: bool) -> None:
     assert _isbn_equal(calibre, opf) is expected
+
+
+@pytest.mark.parametrize(
+    "calibre, opf, expected",
+    [
+        # Calibre has more precision than OPF and agrees on the common prefix —
+        # Calibre wins, should NOT be flagged as conflict.
+        ("2025-11-11", "2025", True),
+        ("2025-11", "2025", True),
+        ("2025-11-11", "2025-11", True),
+        # Equal.
+        ("2025-11-11", "2025-11-11", True),
+        ("2025", "2025", True),
+        # OPF has more precision and agrees on prefix — this *should* be
+        # proposed as an upgrade (not equal), so the "richer-or-equal"
+        # predicate returns False (allowing the proposal to fire).
+        ("2025", "2025-11-11", False),
+        ("2025-11", "2025-11-11", False),
+        # Real disagreements.
+        ("2024", "2025", False),
+        ("2025-11-11", "2025-11-12", False),
+        ("2025-11", "2025-12", False),
+        # Guard against "2025" being treated as a prefix of "20251111" —
+        # we require the dash separator so partial-string matches don't
+        # pass silently.
+        ("20251111", "2025", False),
+        # Empty sides.
+        ("", "2025", False),
+        ("2025", "", False),
+    ],
+)
+def test_pubdate_richer_or_equal(calibre: str, opf: str, expected: bool) -> None:
+    assert _pubdate_richer_or_equal(calibre, opf) is expected
+
+
+@pytest.mark.parametrize(
+    "value, is_bisac",
+    [
+        ("FIC045000", True),  # Fiction / Action & Adventure
+        ("FIC000000", True),
+        ("NON000000", True),
+        ("JUV000000", True),
+        # Not BISAC:
+        ("Fiction", False),
+        ("Science Fiction", False),
+        ("FIC", False),  # too short
+        ("FIC045", False),  # too few digits
+        ("FIC0450000", False),  # too many digits
+        ("fic045000", False),  # lowercase — not the canonical form
+        ("B00XYZ1234", False),  # Amazon ASIN shape
+        ("9780141036144", False),  # ISBN
+    ],
+)
+def test_bisac_code_regex(value: str, is_bisac: bool) -> None:
+    assert bool(_BISAC_CODE_RE.match(value)) is is_bisac
 
 
 def test_miner_run_lifecycle(db) -> None:
