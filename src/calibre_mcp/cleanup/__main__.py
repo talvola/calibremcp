@@ -53,6 +53,8 @@ def main(argv: list[str] | None = None) -> int:
         return _cmd_apply(args)
     if args.cmd == "miner" and args.subcmd == "web":
         return _cmd_web(args)
+    if args.cmd == "miner" and args.subcmd == "goodreads":
+        return _cmd_goodreads(args)
     parser.print_help()
     return 2
 
@@ -125,6 +127,26 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     web.add_argument("--host", default="127.0.0.1")
     web.add_argument("--port", type=int, default=8090)
+
+    gr = msub.add_parser(
+        "goodreads",
+        help="Phase 2: look up Goodreads IDs via ISBN redirect for books that lack one",
+    )
+    gr.add_argument("--calibre-db", type=Path, required=True, help="Calibre metadata.db (read-only)")
+    gr.add_argument("--proposals-db", type=Path, required=True)
+    gr.add_argument(
+        "--rate",
+        type=float,
+        default=1.0,
+        help="Seconds between requests (default: 1.0; Goodreads is touchy about bulk)",
+    )
+    gr.add_argument(
+        "--limit",
+        type=int,
+        default=None,
+        help="Stop after N books (useful for a small sample run first)",
+    )
+    gr.add_argument("--user-agent", default=None, help="Override the default browser UA")
 
     for verb, help_text in [
         ("approve", "Mark matching proposals as approved (ready to apply)"),
@@ -249,6 +271,38 @@ def _cmd_review(args: argparse.Namespace) -> int:
             r["source"],
             f"{r['confidence']:.2f}",
         )
+    console.print(table)
+    return 0
+
+
+def _cmd_goodreads(args: argparse.Namespace) -> int:
+    from calibre_mcp.cleanup import goodreads_lookup
+
+    console = Console()
+    console.print(
+        f"[bold]Goodreads ISBN lookup[/bold]  "
+        f"calibre=[cyan]{args.calibre_db}[/cyan]  "
+        f"rate=[yellow]{args.rate}[/yellow]s  "
+        f"limit=[yellow]{args.limit or 'all'}[/yellow]"
+    )
+    kwargs = {
+        "calibre_db": args.calibre_db,
+        "proposals_db": args.proposals_db,
+        "rate_sec": args.rate,
+        "limit": args.limit,
+    }
+    if args.user_agent:
+        kwargs["user_agent"] = args.user_agent
+    summary = goodreads_lookup.run(**kwargs)
+
+    table = Table(title=f"Run #{summary.run_id}")
+    table.add_column("metric")
+    table.add_column("value", justify="right")
+    table.add_row("attempted", str(summary.attempted))
+    table.add_row("found", str(summary.found))
+    table.add_row("not found", str(summary.not_found))
+    table.add_row("rate limited", str(summary.rate_limited))
+    table.add_row("errors", str(summary.errors))
     console.print(table)
     return 0
 
