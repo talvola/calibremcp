@@ -108,6 +108,10 @@ def _build_parser() -> argparse.ArgumentParser:
         "--limit", type=int, default=None, help="Stop after applying N commands (useful for a cautious first batch)"
     )
     ap.add_argument("--calibredb", default="calibredb", help="Path to calibredb binary (default: found on PATH)")
+    ap.add_argument(
+        "--timeout", type=float, default=30.0,
+        help="Per-book calibredb timeout in seconds (default: 30; bump for slow CIFS moments)",
+    )
 
     web = msub.add_parser("web", help="Launch the proposal-review webapp")
     web.add_argument("--proposals-db", type=Path, required=True)
@@ -309,9 +313,14 @@ def _cmd_apply(args: argparse.Namespace) -> int:
             return 0
 
         # Real execution.
-        console.print(f"\n[bold]Executing {len(commands)} calibredb commands...[/bold]")
+        total = len(commands)
+        console.print(f"\n[bold]Executing {total} calibredb commands...[/bold]")
+        import time as _time
+
+        started = _time.monotonic()
         ok_count = fail_count = 0
-        for result in apply_mod.execute(conn, commands):
+        progress_every = 100 if total > 500 else 25
+        for i, result in enumerate(apply_mod.execute(conn, commands, timeout=args.timeout), start=1):
             if result.ok:
                 ok_count += 1
             else:
@@ -319,6 +328,15 @@ def _cmd_apply(args: argparse.Namespace) -> int:
                 console.print(
                     f"  [red]FAIL[/red] book=#{result.command.book_id} "
                     f"rc={result.returncode} stderr={result.stderr.strip()!r}"
+                )
+            if i % progress_every == 0 or i == total:
+                elapsed = _time.monotonic() - started
+                rate = i / elapsed if elapsed else 0
+                remaining = (total - i) / rate if rate else 0
+                console.print(
+                    f"  [cyan]progress[/cyan] {i}/{total} "
+                    f"(ok={ok_count} fail={fail_count}) "
+                    f"rate={rate:.1f}/s eta={remaining / 60:.1f} min"
                 )
         console.print(f"[green]Applied:[/green] {ok_count}  [red]Failed:[/red] {fail_count}")
         return 0 if fail_count == 0 else 1
