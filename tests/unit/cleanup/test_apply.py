@@ -78,20 +78,28 @@ def test_plan_groups_fields_per_book(db) -> None:
     assert "--field=pubdate:2014-11-10" in by_book[42].argv
 
 
-def test_plan_includes_identifier_fields_skips_tags(db) -> None:
+def test_plan_includes_identifier_and_tag_fields(db) -> None:
+    """Phase 3b: tags.add now flows through (with merge); identifier.* too."""
     _seed(db, 1, "isbn", "9780141036144")
     _seed(db, 1, "tags.add", "Science Fiction")
     _seed(db, 1, "identifier.goodreads", "12345")
     _seed(db, 1, "identifier.amazon", "B00XYZ1234")
     cmds = list(apply_mod.plan(db, library_path=Path("/lib")))
     assert len(cmds) == 1
-    # Identifier.* proposals flow through (Phase 3a); tags.add still deferred.
-    assert set(cmds[0].fields) == {"isbn", "identifier.goodreads", "identifier.amazon"}
-    # All three identifier schemes should appear in the single merged
-    # --field=identifiers:... argument.
+    # All four flow through.
+    assert set(cmds[0].fields) == {
+        "isbn",
+        "tags.add",
+        "identifier.goodreads",
+        "identifier.amazon",
+    }
+    # Identifiers merged into one arg.
     id_arg = next(a for a in cmds[0].argv if a.startswith("--field=identifiers:"))
     payload = id_arg.removeprefix("--field=identifiers:")
     assert payload == "amazon:B00XYZ1234,goodreads:12345,isbn:9780141036144"
+    # Tags get their own merged arg too.
+    tags_arg = next(a for a in cmds[0].argv if a.startswith("--field=tags:"))
+    assert "Science Fiction" in tags_arg
 
 
 def test_plan_description_aliased_to_comments(db) -> None:
@@ -109,18 +117,17 @@ def test_plan_only_approved_flows(db) -> None:
     assert cmds[0].book_id == 2
 
 
-def test_plan_report_distinguishes_skipped(db) -> None:
+def test_plan_report_lists_all_applicable_fields(db) -> None:
     _seed(db, 1, "isbn", "9780141036144")
     _seed(db, 1, "tags.add", "Horror")
     _seed(db, 2, "tags.add", "Science Fiction")
     _seed(db, 2, "identifier.goodreads", "12345")
     report = apply_mod.plan_report(db)
+    # Phase 1+3a+3b: all are applicable, none skipped.
     assert report["isbn"] == 1
-    # Phase 3a: identifier.* fields are applicable now.
     assert report["identifier.goodreads"] == 1
-    # tags.add still deferred (Phase 3b — list-merge).
-    assert "tags.add (skipped: needs merge)" in report
-    assert report["tags.add (skipped: needs merge)"] == 2
+    assert report["tags.add"] == 2
+    assert not any("skipped" in k for k in report)
 
 
 def test_plan_respects_field_filter(db) -> None:
@@ -230,6 +237,102 @@ def test_plan_single_book_multiple_identifier_schemes(tmp_path: Path, db) -> Non
     payload = id_arg.removeprefix("--field=identifiers:")
     # Alphabetical: goodreads sorts before google (4th char: 'd' < 'g').
     assert payload == "amazon:B00XYZ1234,goodreads:12345,google:abcDEF,isbn:9780141036144"
+
+
+def _make_calibre_db_with_tags(library_path: Path, book_id: int, tags: list[str]) -> None:
+    """Minimal Calibre schema for tag-merge testing: tags + books_tags_link."""
+    library_path.mkdir(parents=True, exist_ok=True)
+    db_path = library_path / "metadata.db"
+    conn = sqlite3.connect(db_path)
+    try:
+        conn.executescript(
+            """
+            CREATE TABLE identifiers (
+              id INTEGER PRIMARY KEY AUTOINCREMENT,
+              book INTEGER NOT NULL, type TEXT NOT NULL, val TEXT NOT NULL
+            );
+            CREATE TABLE tags (
+              id INTEGER PRIMARY KEY AUTOINCREMENT,
+              name TEXT NOT NULL
+            );
+            CREATE TABLE books_tags_link (
+              id INTEGER PRIMARY KEY AUTOINCREMENT,
+              book INTEGER NOT NULL, tag INTEGER NOT NULL
+            );
+            """
+        )
+        for name in tags:
+            cur = conn.execute("INSERT INTO tags (name) VALUES (?)", (name,))
+            conn.execute(
+                "INSERT INTO books_tags_link (book, tag) VALUES (?, ?)",
+                (book_id, cur.lastrowid),
+            )
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def test_plan_tags_add_merges_with_existing_tags(tmp_path: Path, db) -> None:
+    """Phase 3b: book has 'Cthulhu' and 'Horror' in Calibre, we approve adding
+    'Mythos'. Apply must emit the full tag list — calibredb's --field=tags
+    REPLACES the list, so missing 'Cthulhu' would silently drop it."""
+    library = tmp_path / "lib"
+    _make_calibre_db_with_tags(library, book_id=42, tags=["Cthulhu", "Horror"])
+    _seed(db, 42, "tags.add", "Mythos")
+
+    cmd = next(apply_mod.plan(db, library_path=library))
+    tags_arg = next(a for a in cmd.argv if a.startswith("--field=tags:"))
+    payload = tags_arg.removeprefix("--field=tags:")
+    # Existing tags preserved in their original order, new tag appended.
+    assert payload == "Cthulhu,Horror,Mythos"
+
+
+def test_plan_tags_add_skips_duplicate_case_insensitive(tmp_path: Path, db) -> None:
+    """A 'tags.add' approval that case-folds to an existing tag is a no-op
+    on the Calibre side (the merge dedupes). The argv still emits the list
+    so calibredb writes the (unchanged) full set, but no duplicate appears."""
+    library = tmp_path / "lib"
+    _make_calibre_db_with_tags(library, book_id=42, tags=["Cthulhu"])
+    _seed(db, 42, "tags.add", "cthulhu")  # different case
+    cmd = next(apply_mod.plan(db, library_path=library))
+    tags_arg = next(a for a in cmd.argv if a.startswith("--field=tags:"))
+    assert tags_arg.removeprefix("--field=tags:") == "Cthulhu"
+
+
+def test_plan_tags_add_with_empty_existing(tmp_path: Path, db) -> None:
+    library = tmp_path / "lib"
+    _make_calibre_db_with_tags(library, book_id=42, tags=[])
+    _seed(db, 42, "tags.add", "Cozy Mystery")
+    _seed(db, 42, "tags.add", "Cthulhu")
+    cmd = next(apply_mod.plan(db, library_path=library))
+    tags_arg = next(a for a in cmd.argv if a.startswith("--field=tags:"))
+    payload = tags_arg.removeprefix("--field=tags:")
+    # Order preserved as proposals were processed (sqlite3 returns by id).
+    assert sorted(payload.split(",")) == ["Cozy Mystery", "Cthulhu"]
+
+
+def test_plan_tags_add_strips_commas_in_values(tmp_path: Path, db) -> None:
+    """Tag values with commas would corrupt the comma-separated list calibredb
+    expects. Defensive replace with space."""
+    library = tmp_path / "lib"
+    _make_calibre_db_with_tags(library, book_id=42, tags=[])
+    _seed(db, 42, "tags.add", "Cooking, Vegetarian")
+    cmd = next(apply_mod.plan(db, library_path=library))
+    tags_arg = next(a for a in cmd.argv if a.startswith("--field=tags:"))
+    assert "," not in tags_arg.removeprefix("--field=tags:")
+
+
+def test_plan_combined_isbn_and_tags(tmp_path: Path, db) -> None:
+    """A book with both an ISBN and tags.add proposals emits two merged
+    --field args: one identifiers, one tags."""
+    library = tmp_path / "lib"
+    _make_calibre_db_with_tags(library, book_id=42, tags=["Cthulhu"])
+    _seed(db, 42, "isbn", "9780141036144")
+    _seed(db, 42, "tags.add", "Mythos")
+    cmd = next(apply_mod.plan(db, library_path=library))
+    field_args = [a for a in cmd.argv if a.startswith("--field=")]
+    assert any(a.startswith("--field=identifiers:") for a in field_args)
+    assert any(a.startswith("--field=tags:") for a in field_args)
 
 
 def test_plan_identifier_only_no_scalar_proposals(tmp_path: Path, db) -> None:

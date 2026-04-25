@@ -55,6 +55,8 @@ def main(argv: list[str] | None = None) -> int:
         return _cmd_web(args)
     if args.cmd == "miner" and args.subcmd == "goodreads":
         return _cmd_goodreads(args)
+    if args.cmd == "miner" and args.subcmd == "normalize-tags":
+        return _cmd_normalize_tags(args)
     parser.print_help()
     return 2
 
@@ -147,6 +149,16 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Stop after N books (useful for a small sample run first)",
     )
     gr.add_argument("--user-agent", default=None, help="Override the default browser UA")
+
+    nt = msub.add_parser(
+        "normalize-tags",
+        help="Phase 3b: classify tags.add proposals as approve/reject/defer",
+    )
+    nt.add_argument(
+        "--calibre-db", type=Path, required=True, help="Calibre metadata.db (read-only — for canonical vocabulary)"
+    )
+    nt.add_argument("--proposals-db", type=Path, required=True)
+    nt.add_argument("--dry-run", action="store_true", help="Show counts only; don't update proposal statuses")
 
     for verb, help_text in [
         ("approve", "Mark matching proposals as approved (ready to apply)"),
@@ -271,6 +283,29 @@ def _cmd_review(args: argparse.Namespace) -> int:
             r["source"],
             f"{r['confidence']:.2f}",
         )
+    console.print(table)
+    return 0
+
+
+def _cmd_normalize_tags(args: argparse.Namespace) -> int:
+    from calibre_mcp.cleanup import tag_normalizer
+
+    console = Console()
+    console.print(
+        f"[bold]Tag normalizer[/bold]  calibre=[cyan]{args.calibre_db}[/cyan]  dry_run=[yellow]{args.dry_run}[/yellow]"
+    )
+    summary = tag_normalizer.run(
+        calibre_db=args.calibre_db,
+        proposals_db=args.proposals_db,
+        dry_run=args.dry_run,
+    )
+    table = Table(title=f"Run #{summary.run_id}")
+    table.add_column("verdict")
+    table.add_column("count", justify="right")
+    table.add_row("examined", str(summary.examined))
+    table.add_row("[green]approved[/green]", str(summary.approved))
+    table.add_row("[red]rejected[/red]", str(summary.rejected))
+    table.add_row("deferred (left at proposed)", str(summary.deferred))
     console.print(table)
     return 0
 

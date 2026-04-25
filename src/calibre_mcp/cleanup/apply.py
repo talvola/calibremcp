@@ -45,10 +45,17 @@ _IDENTIFIER_FIELDS: frozenset[str] = frozenset({"isbn"})
 def _is_applicable(field: str) -> bool:
     """True for every proposal field the current apply pipeline can handle.
 
-    Includes all scalar fields, plus any ``identifier.<scheme>`` and the
-    top-level ``isbn`` pseudo-field (which gets translated into an
-    ``identifiers.isbn`` entry at apply time)."""
-    return field in _APPLICABLE_SCALAR_FIELDS or field in _IDENTIFIER_FIELDS or field.startswith("identifier.")
+    Includes:
+      * scalar fields (publisher, pubdate, description, series, series_index)
+      * ``isbn`` and ``identifier.<scheme>`` (merged into the identifiers dict)
+      * ``tags.add`` (merged into Calibre's tags list)
+    """
+    return (
+        field in _APPLICABLE_SCALAR_FIELDS
+        or field in _IDENTIFIER_FIELDS
+        or field.startswith("identifier.")
+        or field == "tags.add"
+    )
 
 
 # Proposal field -> calibredb --field name (they mostly match; the main
@@ -141,6 +148,7 @@ def plan(
             argv: list[str] = [calibredb, "set_metadata", f"--library-path={library_path}"]
             fields_map: dict[str, str] = {}
             identifier_updates: dict[str, str] = {}
+            tag_additions: list[str] = []
 
             for row in book_rows:
                 field = row["field"]
@@ -154,6 +162,8 @@ def plan(
                 elif field.startswith("identifier."):
                     scheme = field.split(".", 1)[1]
                     identifier_updates[scheme] = value
+                elif field == "tags.add":
+                    tag_additions.append(value)
                 else:
                     # Direct scalar: --field=<calibre_name>:<value>.
                     calibre_field = _FIELD_ALIASES.get(field, field)
@@ -163,6 +173,14 @@ def plan(
                 current = _current_identifiers(cal_conn, book_id) if cal_conn else {}
                 current.update(identifier_updates)
                 argv.append(f"--field=identifiers:{_format_identifiers(current)}")
+
+            if tag_additions:
+                # calibredb's --field=tags:... REPLACES the entire tag list,
+                # so read current tags from Calibre and merge in the
+                # approved additions. Same shape as the identifiers merge.
+                current_tags = _current_tags(cal_conn, book_id) if cal_conn else []
+                merged = _merge_tags(current_tags, tag_additions)
+                argv.append(f"--field=tags:{_format_tags(merged)}")
 
             argv.append(str(book_id))
             yield ApplyCommand(
@@ -192,6 +210,46 @@ def _format_identifiers(ids: dict[str, str]) -> str:
     """Render an identifiers dict in calibredb's ``scheme1:val1,scheme2:val2``
     form. Sorted for deterministic output."""
     return ",".join(f"{k}:{v}" for k, v in sorted(ids.items()))
+
+
+def _current_tags(cal_conn: sqlite3.Connection, book_id: int) -> list[str]:
+    """Read the current tag list for a book from Calibre's DB."""
+    rows = cal_conn.execute(
+        """
+        SELECT t.name FROM tags t
+        JOIN books_tags_link btl ON btl.tag = t.id
+        WHERE btl.book = ?
+        """,
+        (book_id,),
+    ).fetchall()
+    return [(r["name"] or "").strip() for r in rows if (r["name"] or "").strip()]
+
+
+def _merge_tags(current: list[str], additions: list[str]) -> list[str]:
+    """Union ``current`` with ``additions``, preserving original order and
+    appending only tags not already present (case-insensitive)."""
+    seen_ci: set[str] = set()
+    out: list[str] = []
+    for tag in current:
+        cf = tag.casefold()
+        if cf not in seen_ci:
+            seen_ci.add(cf)
+            out.append(tag)
+    for tag in additions:
+        cf = tag.casefold()
+        if cf not in seen_ci:
+            seen_ci.add(cf)
+            out.append(tag)
+    return out
+
+
+def _format_tags(tags: list[str]) -> str:
+    """Render the tag list as calibredb expects: comma-separated.
+
+    Calibre splits on commas, so tag values containing commas would corrupt
+    the list. Real tags don't usually contain commas, but we strip just in
+    case to fail safe rather than silently mis-split."""
+    return ",".join(t.replace(",", " ") for t in tags)
 
 
 def plan_report(conn: sqlite3.Connection) -> dict[str, int]:
