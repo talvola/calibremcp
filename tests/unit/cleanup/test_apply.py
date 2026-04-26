@@ -459,3 +459,205 @@ def test_set_status_where_stores_notes(db) -> None:
     row = db.execute("SELECT status, notes FROM proposals WHERE id=?", (pid,)).fetchone()
     assert row["status"] == "rejected"
     assert row["notes"] == "wrong edition"
+
+
+# ---------------------------------------------------------------------------
+# Tag-level ops (tag.delete / tag.merge): plan() expansion + execute()
+# ---------------------------------------------------------------------------
+
+
+def _make_calibre_db_multibook_tags(
+    library_path: Path, books: dict[int, list[str]],
+) -> None:
+    """Seed multiple books each carrying a distinct tag list."""
+    library_path.mkdir(parents=True, exist_ok=True)
+    db_path = library_path / "metadata.db"
+    conn = sqlite3.connect(db_path)
+    try:
+        conn.executescript(
+            """
+            CREATE TABLE identifiers (
+              id INTEGER PRIMARY KEY AUTOINCREMENT,
+              book INTEGER NOT NULL, type TEXT NOT NULL, val TEXT NOT NULL
+            );
+            CREATE TABLE tags (
+              id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT NOT NULL
+            );
+            CREATE TABLE books_tags_link (
+              id INTEGER PRIMARY KEY AUTOINCREMENT,
+              book INTEGER NOT NULL, tag INTEGER NOT NULL
+            );
+            """
+        )
+        # Dedupe tag-name → id so multiple books can share a tag.
+        name_to_id: dict[str, int] = {}
+        for book_id, tag_names in books.items():
+            for name in tag_names:
+                if name not in name_to_id:
+                    cur = conn.execute("INSERT INTO tags (name) VALUES (?)", (name,))
+                    name_to_id[name] = cur.lastrowid
+                conn.execute(
+                    "INSERT INTO books_tags_link (book, tag) VALUES (?, ?)",
+                    (book_id, name_to_id[name]),
+                )
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def _seed_tag_op(
+    db, *, op: str, src: str, target: str | None, status: str = "approved",
+) -> int:
+    """Insert a tag.delete or tag.merge proposal in the tag-op shape used by
+    the live-tag sweep. Returns the proposal id."""
+    run_id = proposals.start_run(
+        db,
+        source="live_tag_sweep",
+        library_root=Path("/tmp/library"),  # noqa: S108
+        metadata_db_path=Path("/tmp/library/metadata.db"),  # noqa: S108
+        dry_run=False,
+    )
+    if op == "tag.delete":
+        proposed_value = src
+    else:
+        assert target is not None
+        proposed_value = f"{src} -> {target}"
+    proposals.insert_proposal(
+        db,
+        run_id,
+        Proposal(
+            book_id=0,
+            field=op,
+            calibre_value=src,
+            proposed_value=proposed_value,
+            source="live_tag_sweep",
+            confidence=1.0,
+        ),
+    )
+    pid = db.execute(
+        "SELECT id FROM proposals WHERE field=? AND calibre_value=? AND proposed_value=?",
+        (op, src, proposed_value),
+    ).fetchone()["id"]
+    if status != "proposed":
+        proposals.set_status(db, pid, status)
+    return pid
+
+
+def test_plan_tag_delete_expands_to_each_affected_book(tmp_path: Path, db) -> None:
+    library = tmp_path / "lib"
+    _make_calibre_db_multibook_tags(library, {
+        10: ["General", "Science Fiction"],
+        20: ["General", "Mystery"],
+        30: ["Fantasy"],  # not affected
+    })
+    pid = _seed_tag_op(db, op="tag.delete", src="General", target=None)
+
+    cmds = list(apply_mod.plan(db, library_path=library))
+    by_book = {c.book_id: c for c in cmds}
+    assert set(by_book) == {10, 20}  # only books that had the tag
+    # Each affected command carries the tag-op proposal_id (not per-book).
+    for cmd in by_book.values():
+        assert cmd.proposal_ids == ()
+        assert cmd.tag_op_proposal_ids == (pid,)
+        tags_arg = next(a for a in cmd.argv if a.startswith("--field=tags:"))
+        # 'General' removed, other tags preserved.
+        assert "General" not in tags_arg.removeprefix("--field=tags:")
+
+
+def test_plan_tag_merge_substitutes_target(tmp_path: Path, db) -> None:
+    library = tmp_path / "lib"
+    _make_calibre_db_multibook_tags(library, {
+        10: ["sf", "Adventure"],
+        20: ["sf", "Mystery"],
+    })
+    _seed_tag_op(db, op="tag.merge", src="sf", target="Science Fiction")
+
+    cmds = list(apply_mod.plan(db, library_path=library))
+    by_book = {c.book_id: c for c in cmds}
+    assert set(by_book) == {10, 20}
+    payload10 = next(a for a in by_book[10].argv if a.startswith("--field=tags:")).removeprefix("--field=tags:")
+    # 'sf' replaced with 'Science Fiction', Adventure preserved.
+    assert payload10.split(",") == ["Science Fiction", "Adventure"]
+
+
+def test_plan_tag_merge_dedupes_when_target_already_present(tmp_path: Path, db) -> None:
+    """Book has both 'sf' and 'Science Fiction'. Merging sf→Science Fiction
+    must not produce two 'Science Fiction' entries."""
+    library = tmp_path / "lib"
+    _make_calibre_db_multibook_tags(library, {
+        10: ["sf", "Science Fiction", "Mystery"],
+    })
+    _seed_tag_op(db, op="tag.merge", src="sf", target="Science Fiction")
+
+    cmds = list(apply_mod.plan(db, library_path=library))
+    payload = next(a for a in cmds[0].argv if a.startswith("--field=tags:")).removeprefix("--field=tags:")
+    parts = payload.split(",")
+    assert parts.count("Science Fiction") == 1
+    assert "Mystery" in parts
+    assert "sf" not in parts
+
+
+def test_plan_combines_tag_op_with_per_book_tags_add(tmp_path: Path, db) -> None:
+    """Single book with both a tag.merge fanned-out op AND a tags.add
+    per-book proposal must produce one calibredb command, not two."""
+    library = tmp_path / "lib"
+    _make_calibre_db_multibook_tags(library, {42: ["sf", "Mystery"]})
+    _seed_tag_op(db, op="tag.merge", src="sf", target="Science Fiction")
+    _seed(db, 42, "tags.add", "Cthulhu Mythos")
+
+    cmds = list(apply_mod.plan(db, library_path=library))
+    assert len(cmds) == 1
+    cmd = cmds[0]
+    payload = next(a for a in cmd.argv if a.startswith("--field=tags:")).removeprefix("--field=tags:")
+    parts = payload.split(",")
+    assert "sf" not in parts
+    assert "Science Fiction" in parts
+    assert "Mystery" in parts
+    assert "Cthulhu Mythos" in parts
+
+
+def test_plan_tag_op_no_affected_books_yields_nothing(tmp_path: Path, db) -> None:
+    """Approved tag.delete for a tag no book actually has (e.g. already
+    cleaned up in a prior partial apply) should produce zero commands."""
+    library = tmp_path / "lib"
+    _make_calibre_db_multibook_tags(library, {10: ["Fantasy"]})
+    _seed_tag_op(db, op="tag.delete", src="DoesNotExist", target=None)
+    cmds = list(apply_mod.plan(db, library_path=library))
+    assert cmds == []
+
+
+def test_execute_tag_op_marks_applied_only_when_all_books_succeed(
+    tmp_path: Path, db,
+) -> None:
+    library = tmp_path / "lib"
+    _make_calibre_db_multibook_tags(library, {
+        10: ["General", "Science Fiction"],
+        20: ["General", "Mystery"],
+    })
+    pid = _seed_tag_op(db, op="tag.delete", src="General", target=None)
+    fake = _install_fake_calibredb(tmp_path)
+
+    cmds = list(apply_mod.plan(db, library_path=library, calibredb=str(fake)))
+    list(apply_mod.execute(db, cmds))
+    row = db.execute("SELECT status FROM proposals WHERE id=?", (pid,)).fetchone()
+    assert row["status"] == "applied"
+
+
+def test_execute_tag_op_partial_failure_keeps_approved(
+    tmp_path: Path, db,
+) -> None:
+    """If even one of the per-book commands for a tag-op fails, the tag-op
+    proposal stays as 'approved' so a re-run picks up the survivors."""
+    library = tmp_path / "lib"
+    _make_calibre_db_multibook_tags(library, {
+        10: ["General", "Science Fiction"],
+        20: ["General", "Mystery"],
+    })
+    pid = _seed_tag_op(db, op="tag.delete", src="General", target=None)
+    fake = _install_fake_calibredb(tmp_path, exit_code=1)  # every call fails
+
+    cmds = list(apply_mod.plan(db, library_path=library, calibredb=str(fake)))
+    list(apply_mod.execute(db, cmds))
+    row = db.execute("SELECT status, notes FROM proposals WHERE id=?", (pid,)).fetchone()
+    assert row["status"] == "approved"  # not 'applied', not 'conflict'
+    assert "per-book commands failed" in (row["notes"] or "")
