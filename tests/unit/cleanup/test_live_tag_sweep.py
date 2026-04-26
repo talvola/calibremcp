@@ -166,6 +166,22 @@ def test_empty_or_whitespace_deletes() -> None:
         assert verdict == "delete"
 
 
+def test_explicit_merge_self_match_keeps() -> None:
+    """When the source equals the explicit-merge target case-insensitively,
+    we should keep — happens when a prior apply created the canonical
+    Title-Case variant and a re-sweep finds it via the same map.
+    Regression test: 'Conan' → 'Conan' was being emitted as a no-op merge."""
+    for name in ("Conan", "conan", "CONAN"):
+        verdict, target, _ = classify(name, count=1)
+        if name == "Conan":
+            # canonical form: keep; no merge attempted.
+            assert verdict == "keep", f"{name!r} should keep when it IS the canonical"
+        else:
+            # case variant: merge to the canonical.
+            assert verdict == "merge"
+            assert target == "Conan"
+
+
 def test_canonical_set_consistency() -> None:
     """Every EXPLICIT_MERGES target must be a real canonical name (either in
     CANONICAL_GENRES or used as a multi-author character)."""

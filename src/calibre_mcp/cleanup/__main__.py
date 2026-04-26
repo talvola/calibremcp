@@ -28,6 +28,7 @@ from rich.table import Table
 
 from calibre_mcp.cleanup import apply as apply_mod
 from calibre_mcp.cleanup import miner, proposals
+from calibre_mcp.cleanup import refresh as refresh_mod
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -57,6 +58,8 @@ def main(argv: list[str] | None = None) -> int:
         return _cmd_goodreads(args)
     if args.cmd == "miner" and args.subcmd == "normalize-tags":
         return _cmd_normalize_tags(args)
+    if args.cmd == "miner" and args.subcmd == "refresh":
+        return _cmd_refresh(args)
     parser.print_help()
     return 2
 
@@ -159,6 +162,26 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     nt.add_argument("--proposals-db", type=Path, required=True)
     nt.add_argument("--dry-run", action="store_true", help="Show counts only; don't update proposal statuses")
+
+    rf = msub.add_parser(
+        "refresh",
+        help="Re-run Phases 1+3b+4 to pick up new books and post-fix classifier improvements (propose-only)",
+    )
+    rf.add_argument("--library", type=Path, required=True, help="Calibre library root")
+    rf.add_argument("--metadata-db", type=Path, required=True, help="Path to metadata.db")
+    rf.add_argument("--proposals-db", type=Path, required=True)
+    rf.add_argument(
+        "--since-book-id",
+        type=int,
+        default=None,
+        help="Scope Phase 1 OPF mining to books with id >= this value "
+             "(typically <previous-max-id>+1). Phases 3b/4 always run on the whole DB.",
+    )
+    rf.add_argument(
+        "--show-new",
+        action="store_true",
+        help="After the refresh, list every proposal attached to the runs just executed.",
+    )
 
     for verb, help_text in [
         ("approve", "Mark matching proposals as approved (ready to apply)"),
@@ -481,6 +504,64 @@ def _cmd_set_status(args: argparse.Namespace, new_status: str) -> int:
                 return 1
         changed = proposals.set_status_where(conn, new_status, notes=args.notes, **filter_kwargs)
         console.print(f"[green]{new_status}[/green] {changed} proposal(s).")
+    return 0
+
+
+def _cmd_refresh(args: argparse.Namespace) -> int:
+    console = Console()
+    scope = f"book_id >= {args.since_book_id}" if args.since_book_id is not None else "all books"
+    console.print(
+        f"[bold]Refresh[/bold]  library=[cyan]{args.library}[/cyan]  "
+        f"scope=[yellow]{scope}[/yellow]  proposals=[cyan]{args.proposals_db}[/cyan]"
+    )
+
+    summary = refresh_mod.run(
+        library_root=args.library,
+        metadata_db=args.metadata_db,
+        proposals_db=args.proposals_db,
+        since_book_id=args.since_book_id,
+    )
+
+    table = Table(title="Refresh summary")
+    table.add_column("phase")
+    table.add_column("emitted", justify="right")
+    table.add_column("elapsed", justify="right")
+    table.add_column("notes")
+    for ph in (summary.phase1, summary.phase3b, summary.phase4):
+        table.add_row(ph.name, str(ph.proposals_emitted), f"{ph.elapsed_sec:.1f}s", ph.notes)
+    console.print(table)
+    console.print(
+        f"[bold]Total new proposals:[/bold] {summary.total_new_proposals}  "
+        f"(books touched in Phase 1: {summary.new_books_seen})"
+    )
+
+    if args.show_new:
+        rows = refresh_mod.list_new_proposals(args.proposals_db, since_minutes=10)
+        if not rows:
+            console.print("[dim]No proposals in the last 10 min.[/dim]")
+        else:
+            t2 = Table(title=f"New proposals ({len(rows)})")
+            t2.add_column("book", justify="right")
+            t2.add_column("field")
+            t2.add_column("calibre", max_width=30, overflow="fold")
+            t2.add_column("proposed", max_width=40, overflow="fold")
+            t2.add_column("status")
+            t2.add_column("source")
+            for r in rows:
+                t2.add_row(
+                    str(r["book_id"]) if r["book_id"] != 0 else "—",
+                    r["field"],
+                    r["calibre_value"] or "",
+                    r["proposed_value"] or "",
+                    r["status"],
+                    r["source"],
+                )
+            console.print(t2)
+
+    console.print(
+        "\n[dim]Next: review with [bold]miner review[/bold] / approve, then "
+        "[bold]miner apply --execute[/bold] (rw mount + Calibre-Web stop required for apply).[/dim]"
+    )
     return 0
 
 

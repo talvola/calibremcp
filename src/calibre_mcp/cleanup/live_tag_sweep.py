@@ -296,9 +296,16 @@ def classify(name: str, *, count: int) -> tuple[Verdict, str | None, str]:
     if cf in NOISE_PATTERN_WHITELIST:
         return "keep", None, "whitelisted (real thing shaped like noise)"
 
-    # 2. Explicit curated merges (highest priority)
+    # 2. Explicit curated merges (highest priority). Skip if the source
+    # already IS the canonical (exact string match) — happens when an
+    # apply pass has already created the canonical Title-Case variant
+    # and a subsequent sweep re-classifies it via the same map. A
+    # different-case variant (e.g. lowercase 'conan') still merges so
+    # the case-rename happens.
     if cf in EXPLICIT_MERGES:
         target = EXPLICIT_MERGES[cf]
+        if v == target:
+            return "keep", None, ""
         return "merge", target, f"explicit map → {target!r}"
 
     # 3. Deletion patterns

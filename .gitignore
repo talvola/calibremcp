@@ -121,6 +121,9 @@ calibre/
 # Environment variables
 .env
 
+# Claude Code per-user permissions (don't share Erik's allowlist)
+.claude/settings.local.json
+
 # Local development
 local_settings.py
 local_settings.json
