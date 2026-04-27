@@ -51,7 +51,7 @@ SOURCE = "cookbook_llm"
 # Taxonomy — the closed set of facet labels Claude is allowed to pick from.
 # ---------------------------------------------------------------------------
 
-# Cuisine: 15 labels covering the bulk of cookbook cuisine signal.
+# Cuisine: 16 labels covering the bulk of cookbook cuisine signal.
 # Empty list is allowed for generic / multi-cuisine books — the prompt
 # explicitly tells the model not to force a tag.
 #
@@ -70,6 +70,7 @@ CuisineTag = Literal[
     "Thai",
     "Filipino",
     "Indian",
+    "Hawaiian",
     "Mexican",
     "Mediterranean",
     "Middle Eastern",
@@ -160,8 +161,8 @@ SYSTEM_PROMPT = """You're tagging cookbooks for a personal-library discovery sys
 The taxonomy is closed and small — these are the only labels you may use:
 
   CUISINE: Italian, French, Asian, Japanese, Chinese, Korean, Vietnamese,
-           Thai, Filipino, Indian, Mexican, Mediterranean, Middle Eastern,
-           American, Latin American
+           Thai, Filipino, Indian, Hawaiian, Mexican, Mediterranean,
+           Middle Eastern, American, Latin American
   TECHNIQUE: Baking, Pastry, Grilling/BBQ, Slow Cooker, Pressure Cooker,
              Bread, Cocktails, Preservation, Fermentation, One-Pot
   DIETARY: Vegetarian, Vegan, Gluten-Free, Keto/Low-Carb, Paleo,
@@ -357,10 +358,10 @@ Examples — calibrate against these:
 
 * "Aloha Kitchen: Recipes from Hawai'i" — Hawaiian fusion with
   Japanese / Filipino / Polynesian / American influences
-  → cuisine=[], technique=[], dietary=[], confidence='medium'
-  (Hawaiian fusion isn't really one of the listed cuisines; empty is
-   honest. Don't force 'American' or 'Asian' here — Hawaiian is its
-   own thing.)
+  → cuisine=['Hawaiian'], technique=[], dietary=[], confidence='high'
+  (Hawaiian is its own taxonomy label — use it for cookbooks rooted
+   in Hawai'i regardless of the underlying influence mix. Do NOT also
+   add 'Asian' or 'American'.)
 
 The pattern: when in doubt, prefer empty over guessing. The user can
 always add tags later, but bulk-removing wrong tags is more painful.

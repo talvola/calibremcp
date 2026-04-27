@@ -30,8 +30,8 @@ from calibre_mcp.cleanup.cookbook_tagger import (
 def test_taxonomy_sizes() -> None:
     """If we add or remove labels, this test breaks deliberately so we
     notice. Erik's guidance + strategy memo target ~30 facets; current
-    is 15+10+6 = 31."""
-    assert len(CuisineTag.__args__) == 15  # type: ignore[attr-defined]
+    is 16+10+6 = 32."""
+    assert len(CuisineTag.__args__) == 16  # type: ignore[attr-defined]
     assert len(TechniqueTag.__args__) == 10  # type: ignore[attr-defined]
     assert len(DietaryTag.__args__) == 6  # type: ignore[attr-defined]
 
