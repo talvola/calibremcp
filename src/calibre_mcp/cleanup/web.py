@@ -294,6 +294,16 @@ TEMPLATE_COOKBOOKS = (
   <button type="submit">Apply</button>
 </form>
 
+{% if no_tags_count %}
+<p class="dim">
+  <a href="/proposals?source=cookbook_llm&amp;proposed_value=(no+tags)&amp;status=rejected&amp;size=500">
+    {{ no_tags_count }} books got no tags
+  </a>
+  — the LLM left them empty (sentinel). Worth scanning if you want to
+  manually tag any.
+</p>
+{% endif %}
+
 {% if not facets %}
 <p class="dim">No cookbook_llm proposals at status={{ status }} yet. Run
 <code>miner cookbooks</code> first.</p>
@@ -590,6 +600,17 @@ def create_app(
                 """,
                 (status,),
             ).fetchall()
+            # Sentinel count is independent of the dashboard's status
+            # filter — sentinels live permanently at status='rejected'
+            # and represent "LLM saw the book and didn't find a tag",
+            # not a normal review state.
+            no_tags_count = conn.execute(
+                """
+                SELECT COUNT(*) FROM proposals
+                WHERE source = 'cookbook_llm' AND field = 'tags.add'
+                  AND proposed_value = '(no tags)'
+                """,
+            ).fetchone()[0]
 
         # Build facet-aware groupings using the taxonomy enums.
         cuisines = set(cookbook_tagger.CuisineTag.__args__)  # type: ignore[attr-defined]
@@ -635,6 +656,7 @@ def create_app(
             route="cookbooks",
             status=status,
             facets=facets,
+            no_tags_count=no_tags_count,
             has_covers=book_paths is not None,
             request_url=str(request.url),
             current_filter=f"status={status}",

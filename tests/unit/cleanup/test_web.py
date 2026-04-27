@@ -254,11 +254,17 @@ def test_cookbooks_dashboard_groups_by_facet(cookbook_db: Path) -> None:
 
 
 def test_cookbooks_dashboard_excludes_sentinel(cookbook_db: Path) -> None:
-    """The (no tags) sentinel is an internal skip marker; it must not
-    appear as a tag group in the review UI."""
+    """The (no tags) sentinel must not appear as a tag GROUP in the review
+    UI — but a count + link to the no-tags-bucket view is fine and
+    expected (added so Erik can drill into the books that weren't
+    auto-tagged)."""
     client = TestClient(create_app(proposals_db=cookbook_db))
     body = client.get("/cookbooks").text
-    assert "(no tags)" not in body
+    # No tag *group* labelled (no tags) — the seed has 1 sentinel row.
+    assert "tag-group" in body  # at least one real tag group renders
+    # But the no-tags COUNT + link should be present.
+    assert "1 books got no tags" in body
+    assert "proposed_value=(no+tags)" in body
 
 
 def test_cookbooks_dashboard_shows_book_counts(cookbook_db: Path) -> None:
