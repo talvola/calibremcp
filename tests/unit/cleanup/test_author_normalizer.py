@@ -28,15 +28,26 @@ from calibre_mcp.cleanup.proposals import Proposal
         ("Robert A Heinlein", "robert a heinlein"),
         ("Brian M. Sammons.", "brian m sammons"),   # trailing period stripped
         ("Aristotle.", "aristotle"),
+        # Consecutive single-letter initials collapse to one token
         ("J.R.R. Tolkien", "jrr tolkien"),
         ("JRR Tolkien", "jrr tolkien"),
-        ("George R. R. Martin", "george r r martin"),
-        ("George R R Martin", "george r r martin"),
-        ("George R .R. Martin", "george r r martin"),  # space before period
-        ("H. P. Lovecraft", "h p lovecraft"),
-        ("H P Lovecraft", "h p lovecraft"),
+        ("George R. R. Martin", "george rr martin"),  # R. R. → rr
+        ("George R R Martin", "george rr martin"),
+        ("George R .R. Martin", "george rr martin"),  # space before period
+        ("George R.R. Martin", "george rr martin"),
+        ("H. P. Lovecraft", "hp lovecraft"),          # H. P. → hp
+        ("H P Lovecraft", "hp lovecraft"),
+        ("H.P. Lovecraft", "hp lovecraft"),
+        ("B. V. Larson", "bv larson"),
+        ("B.V. Larson", "bv larson"),
         ("M.C. Beaton", "mc beaton"),
         ("Mc Beaton", "mc beaton"),
+        # Underscore normalisation
+        ("MICHAEL_P. KUBE-MCDOWELL", "michael p kube-mcdowell"),
+        ("Michael P. Kube-McDowell", "michael p kube-mcdowell"),
+        # Single initial not adjacent to another single → not collapsed
+        ("L. Neil Smith", "l neil smith"),
+        ("L Neil Smith", "l neil smith"),
     ],
 )
 def test_normalize_key(name: str, expected: str) -> None:

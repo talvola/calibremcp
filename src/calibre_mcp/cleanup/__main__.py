@@ -66,6 +66,8 @@ def main(argv: list[str] | None = None) -> int:
         return _cmd_cookbooks_review(args)
     if args.cmd == "miner" and args.subcmd == "author-sweep":
         return _cmd_author_sweep(args)
+    if args.cmd == "miner" and args.subcmd == "author-lookup":
+        return _cmd_author_lookup(args)
     parser.print_help()
     return 2
 
@@ -242,6 +244,32 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Proposal status to review (default: proposed)",
     )
 
+    al = msub.add_parser(
+        "author-lookup",
+        help="Phase 6b: resolve missing-initial author pairs via OpenLibrary/VIAF",
+    )
+    al.add_argument("--metadata-db", type=Path, required=True, help="Calibre metadata.db (read-only)")
+    al.add_argument("--proposals-db", type=Path, required=True)
+    al.add_argument("--dry-run", action="store_true", help="Resolve pairs without persisting proposals")
+    al.add_argument(
+        "--rate",
+        type=float,
+        default=1.0,
+        help="Seconds between HTTP requests (default: 1.0)",
+    )
+    al.add_argument(
+        "--limit",
+        type=int,
+        default=None,
+        help="Stop after resolving N pairs (useful for initial sample run)",
+    )
+    al.add_argument(
+        "--min-confidence",
+        type=float,
+        default=0.6,
+        help="Minimum confidence to emit a proposal (default: 0.6)",
+    )
+
     asw = msub.add_parser(
         "author-sweep",
         help="Phase 6a: find punctuation-variant author clusters and propose merges",
@@ -249,6 +277,11 @@ def _build_parser() -> argparse.ArgumentParser:
     asw.add_argument("--metadata-db", type=Path, required=True, help="Calibre metadata.db (read-only)")
     asw.add_argument("--proposals-db", type=Path, required=True)
     asw.add_argument("--dry-run", action="store_true", help="Show clusters without persisting proposals")
+    asw.add_argument(
+        "--show-missing-initials", action="store_true",
+        help="Report author pairs that differ only by a missing middle initial "
+             "(e.g. 'Joe Lansdale' vs 'Joe R. Lansdale') — candidates for manual review",
+    )
 
     for verb, help_text in [
         ("approve", "Mark matching proposals as approved (ready to apply)"),
@@ -757,6 +790,102 @@ def _cmd_author_sweep(args: argparse.Namespace) -> int:
             "\n[dim]Next: review above, reject any that look wrong, then "
             "[bold]miner approve --field author.merge --source author_normalizer --yes[/bold], "
             "then apply with [bold]scripts/apply_with_progress.py --source author_normalizer[/bold] "
+            "(rw mount + Calibre-Web stop required).[/dim]"
+        )
+
+    if getattr(args, "show_missing_initials", False):
+        from calibre_mcp.cleanup import calibre_reader
+        cal = calibre_reader.open_readonly(args.metadata_db)
+        try:
+            pairs = author_normalizer.find_missing_initial_pairs(cal)
+        finally:
+            cal.close()
+        if not pairs:
+            console.print("\n[dim]No missing-initial pairs found.[/dim]")
+        else:
+            mi_table = Table(
+                title=f"Missing-initial candidates ({len(pairs)}) — review manually",
+                show_lines=False,
+            )
+            mi_table.add_column("shorter name", max_width=35, overflow="fold")
+            mi_table.add_column("books", justify="right")
+            mi_table.add_column("longer name (has middle initial)", max_width=35, overflow="fold")
+            mi_table.add_column("books", justify="right")
+            for (short, sn), (long_, ln) in sorted(pairs, key=lambda p: p[1][0].casefold()):
+                mi_table.add_row(short, str(sn), long_, str(ln))
+            console.print(mi_table)
+    return 0
+
+
+def _cmd_author_lookup(args: argparse.Namespace) -> int:
+    from calibre_mcp.cleanup import author_lookup
+
+    console = Console()
+    console.print(
+        f"[bold]Author lookup[/bold]  calibre=[cyan]{args.metadata_db}[/cyan]  "
+        f"rate=[yellow]{args.rate}[/yellow]s  "
+        f"limit=[yellow]{args.limit or 'all'}[/yellow]  "
+        f"dry_run=[yellow]{args.dry_run}[/yellow]"
+    )
+
+    summary, decisions = author_lookup.run(
+        calibre_db=args.metadata_db,
+        proposals_db=args.proposals_db,
+        dry_run=args.dry_run,
+        rate_sec=args.rate,
+        limit=args.limit,
+        min_confidence=args.min_confidence,
+    )
+
+    table = Table(title="Author lookup summary")
+    table.add_column("verdict")
+    table.add_column("count", justify="right")
+    table.add_row("examined", str(summary.examined))
+    table.add_row("[green]merge_to_long[/green]", str(summary.merge_to_long))
+    table.add_row("[green]merge_to_short[/green]", str(summary.merge_to_short))
+    table.add_row("[cyan]new_canonical[/cyan]", str(summary.new_canonical))
+    table.add_row("[yellow]ambiguous[/yellow]", str(summary.ambiguous))
+    table.add_row("[dim]no_data[/dim]", str(summary.no_data))
+    table.add_row("[bold]proposals emitted[/bold]", str(summary.proposals_emitted))
+    console.print(table)
+
+    if decisions:
+        detail = Table(
+            title=f"Decisions ({'dry-run, not saved' if args.dry_run else 'saved to DB'})",
+            show_lines=False,
+        )
+        detail.add_column("short name", max_width=30, overflow="fold")
+        detail.add_column("n", justify="right")
+        detail.add_column("long name (with initial)", max_width=35, overflow="fold")
+        detail.add_column("n", justify="right")
+        detail.add_column("verdict")
+        detail.add_column("canonical", max_width=35, overflow="fold")
+        detail.add_column("conf", justify="right")
+        _VERDICT_STYLE = {
+            "merge_to_long": "[green]→ long[/green]",
+            "merge_to_short": "[green]→ short[/green]",
+            "new_canonical": "[cyan]new form[/cyan]",
+            "ambiguous": "[yellow]ambiguous[/yellow]",
+            "no_data": "[dim]no data[/dim]",
+            "same": "[dim]same[/dim]",
+        }
+        for d in sorted(decisions, key=lambda x: x.long_name.casefold()):
+            detail.add_row(
+                d.short_name,
+                str(d.short_count),
+                d.long_name,
+                str(d.long_count),
+                _VERDICT_STYLE.get(d.verdict, d.verdict),
+                d.canonical or "—",
+                f"{d.confidence:.2f}",
+            )
+        console.print(detail)
+
+    if not args.dry_run and summary.proposals_emitted > 0:
+        console.print(
+            "\n[dim]Next: review above, reject any that look wrong, then "
+            "[bold]miner approve --field author.merge --source author_lookup --yes[/bold], "
+            "then apply with [bold]scripts/apply_with_progress.py --source author_lookup[/bold] "
             "(rw mount + Calibre-Web stop required).[/dim]"
         )
     return 0

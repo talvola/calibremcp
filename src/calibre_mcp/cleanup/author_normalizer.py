@@ -76,6 +76,11 @@ EXPLICIT_OVERRIDES: dict[str, str] = {
     # Her preferred styling has a capital L.
     "Ursula K Le Guin": "Ursula K. Le Guin",
     "Ursula K. le Guin": "Ursula K. Le Guin",
+
+    # H.P. Lovecraft — "hp" and "h p" are different normalisation keys so the
+    # cluster algorithm misses these.  Full name variant also merges here.
+    "H.P. Lovecraft": "H. P. Lovecraft",
+    "Howard Phillips Lovecraft": "H. P. Lovecraft",
 }
 
 
@@ -86,15 +91,40 @@ EXPLICIT_OVERRIDES: dict[str, str] = {
 
 def _normalize_key(name: str) -> str:
     """Strip trailing periods, remove internal periods, collapse whitespace, casefold.
+    Also replaces underscores with spaces (e.g. ``MICHAEL_P.``) and collapses
+    consecutive single-letter tokens so ``"B. V. Larson"`` and ``"B.V. Larson"``
+    both become ``"bv larson"``.
 
-    ``"Robert A. Heinlein"`` and ``"Robert A Heinlein"`` → ``"robert a heinlein"``.
-    ``"Brian M. Sammons."`` (trailing period) → ``"brian m sammons"``.
-    ``"George R .R. Martin"`` (space before period) → ``"george r r martin"``.
+    Examples::
+
+        "Robert A. Heinlein"  → "robert a heinlein"
+        "Brian M. Sammons."   → "brian m sammons"   (trailing period stripped)
+        "B. V. Larson"        → "bv larson"
+        "B.V. Larson"         → "bv larson"
+        "MICHAEL_P. KUBE-MCDOWELL" → "michael p kube-mcdowell"
+        "J.R.R. Tolkien"      → "jrr tolkien"
+        "George R. R. Martin" → "george rr martin"
     """
     s = (name or "").strip().rstrip(".")
-    s = s.replace(".", "")
+    s = s.replace("_", " ")   # MICHAEL_P → MICHAEL P
+    s = s.replace(".", "")    # remove all periods
     s = re.sub(r"\s+", " ", s).strip()
-    return s.casefold()
+    s = s.casefold()
+    # Collapse consecutive single-letter tokens: "b v" → "bv", "r r" → "rr"
+    tokens = s.split()
+    merged: list[str] = []
+    i = 0
+    while i < len(tokens):
+        if len(tokens[i]) == 1:
+            run = tokens[i]
+            while i + 1 < len(tokens) and len(tokens[i + 1]) == 1:
+                i += 1
+                run += tokens[i]
+            merged.append(run)
+        else:
+            merged.append(tokens[i])
+        i += 1
+    return " ".join(merged)
 
 
 def _pick_canonical(variants: list[tuple[str, int]]) -> str:
@@ -134,6 +164,60 @@ class SweepSummary:
 # ---------------------------------------------------------------------------
 # Cluster detection
 # ---------------------------------------------------------------------------
+
+
+def find_missing_initial_pairs(
+    calibre_conn: sqlite3.Connection,
+) -> list[tuple[tuple[str, int], tuple[str, int]]]:
+    """Find author pairs where one name is the other with a middle initial added.
+
+    Matches names that share the same first and last token (case-insensitive)
+    and where the longer name has exactly one extra middle token that looks like
+    an initial (single letter or single letter + period).  Returns pairs as
+    ``((shorter_name, shorter_count), (longer_name, longer_count))``.
+
+    Example: ``("Joe Lansdale", 3), ("Joe R. Lansdale", 40)``.
+    """
+    rows = calibre_conn.execute("""
+        SELECT a.name, COUNT(bal.book) AS n
+        FROM authors a
+        LEFT JOIN books_authors_link bal ON bal.author = a.id
+        GROUP BY a.id
+        ORDER BY a.name
+    """).fetchall()
+
+    # Build index: (first_cf, last_cf) → list of (name, token_count, book_count)
+    by_boundary: dict[tuple[str, str], list[tuple[str, int, int]]] = defaultdict(list)
+    for r in rows:
+        name = (r["name"] or "").strip()
+        tokens = name.split()
+        if len(tokens) < 2:
+            continue
+        key = (tokens[0].casefold().rstrip("."), tokens[-1].casefold().rstrip("."))
+        by_boundary[key].append((name, len(tokens), int(r["n"])))
+
+    pairs = []
+    for entries in by_boundary.values():
+        if len(entries) < 2:
+            continue
+        # Compare every pair within the same first+last bucket.
+        for i in range(len(entries)):
+            for j in range(i + 1, len(entries)):
+                a_name, a_toks, a_n = entries[i]
+                b_name, b_toks, b_n = entries[j]
+                # Exactly one token difference.
+                if abs(a_toks - b_toks) != 1:
+                    continue
+                short, short_n = (a_name, a_n) if a_toks < b_toks else (b_name, b_n)
+                long_, long_n  = (b_name, b_n) if a_toks < b_toks else (a_name, a_n)
+                # The extra token must look like an initial (1-2 chars).
+                long_tokens = long_.split()
+                # Middle tokens = everything except first and last.
+                middle = long_tokens[1:-1]
+                extra = [t for t in middle if t.rstrip(".") not in short.split()]
+                if len(extra) == 1 and len(extra[0].rstrip(".")) <= 2:
+                    pairs.append(((short, short_n), (long_, long_n)))
+    return pairs
 
 
 def find_variant_clusters(
