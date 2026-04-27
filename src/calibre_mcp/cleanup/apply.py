@@ -27,7 +27,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 
-from calibre_mcp.cleanup import calibre_reader, live_tag_sweep, proposals
+from calibre_mcp.cleanup import author_normalizer, calibre_reader, live_tag_sweep, proposals
 
 log = logging.getLogger(__name__)
 
@@ -57,10 +57,12 @@ def _is_applicable(field: str) -> bool:
         or field.startswith("identifier.")
         or field == "tags.add"
         or field in _TAG_OP_FIELDS
+        or field in _AUTHOR_OP_FIELDS
     )
 
 
 _TAG_OP_FIELDS: frozenset[str] = frozenset({"tag.delete", "tag.merge"})
+_AUTHOR_OP_FIELDS: frozenset[str] = frozenset({"author.merge"})
 
 
 # Proposal field -> calibredb --field name (they mostly match; the main
@@ -88,6 +90,7 @@ class ApplyCommand:
     book_id: int
     proposal_ids: tuple[int, ...]
     tag_op_proposal_ids: tuple[int, ...]
+    author_op_proposal_ids: tuple[int, ...]
     fields: dict[str, str]  # proposal-field -> proposed_value
     argv: tuple[str, ...]  # fully-constructed calibredb argv
 
@@ -138,11 +141,14 @@ def plan(
 
     per_book_rows: list[sqlite3.Row] = []
     tag_op_rows: list[sqlite3.Row] = []
+    author_op_rows: list[sqlite3.Row] = []
     for row in rows:
         if not _is_applicable(row["field"]):
             continue
         if row["field"] in _TAG_OP_FIELDS:
             tag_op_rows.append(row)
+        elif row["field"] in _AUTHOR_OP_FIELDS:
+            author_op_rows.append(row)
         else:
             per_book_rows.append(row)
 
@@ -179,8 +185,25 @@ def plan(
                 book_tag_changes[book_id][src.casefold()] = target
                 book_tag_op_ids[book_id].append(op_row["id"])
 
+    # Expand each author.merge proposal to {book_id: {src_cf: canonical}}.
+    book_author_changes: dict[int, dict[str, str]] = defaultdict(dict)
+    book_author_op_ids: dict[int, list[int]] = defaultdict(list)
+    if cal_conn is not None:
+        for op_row in author_op_rows:
+            src = op_row["calibre_value"]
+            if not src:
+                continue
+            _, canonical = author_normalizer.parse_merge_proposed_value(
+                op_row["proposed_value"]
+            )
+            for book_id in _books_with_author(cal_conn, src):
+                book_author_changes[book_id][src.casefold()] = canonical
+                book_author_op_ids[book_id].append(op_row["id"])
+
     try:
-        all_book_ids = sorted(set(by_book) | set(book_tag_changes))
+        all_book_ids = sorted(
+            set(by_book) | set(book_tag_changes) | set(book_author_changes)
+        )
         for book_id in all_book_ids:
             book_rows = by_book.get(book_id, [])
             argv: list[str] = [calibredb, "set_metadata", f"--library-path={library_path}"]
@@ -220,11 +243,18 @@ def plan(
                 )
                 argv.append(f"--field=tags:{_format_tags(new_tags)}")
 
+            author_changes = book_author_changes.get(book_id, {})
+            if author_changes:
+                current_authors = _current_authors(cal_conn, book_id) if cal_conn else []
+                new_authors = _apply_author_ops(current_authors, author_changes)
+                argv.append(f"--field=authors:{_format_authors(new_authors)}")
+
             argv.append(str(book_id))
             yield ApplyCommand(
                 book_id=book_id,
                 proposal_ids=tuple(r["id"] for r in book_rows),
                 tag_op_proposal_ids=tuple(book_tag_op_ids.get(book_id, [])),
+                author_op_proposal_ids=tuple(book_author_op_ids.get(book_id, [])),
                 fields=fields_map,
                 argv=tuple(argv),
             )
@@ -244,6 +274,67 @@ def _books_with_tag(cal_conn: sqlite3.Connection, tag_name: str) -> list[int]:
         (tag_name,),
     ).fetchall()
     return [int(r["book"]) for r in rows]
+
+
+def _books_with_author(cal_conn: sqlite3.Connection, author_name: str) -> list[int]:
+    """Return book ids whose authors list includes ``author_name`` (case-insensitive)."""
+    rows = cal_conn.execute(
+        """
+        SELECT bal.book FROM books_authors_link bal
+        JOIN authors a ON a.id = bal.author
+        WHERE LOWER(a.name) = LOWER(?)
+        """,
+        (author_name,),
+    ).fetchall()
+    return [int(r["book"]) for r in rows]
+
+
+def _current_authors(cal_conn: sqlite3.Connection, book_id: int) -> list[str]:
+    """Read the current authors list for a book from Calibre's DB."""
+    rows = cal_conn.execute(
+        """
+        SELECT a.name FROM authors a
+        JOIN books_authors_link bal ON bal.author = a.id
+        WHERE bal.book = ?
+        ORDER BY bal.id
+        """,
+        (book_id,),
+    ).fetchall()
+    return [(r["name"] or "").strip() for r in rows if (r["name"] or "").strip()]
+
+
+def _apply_author_ops(
+    current: list[str],
+    changes: dict[str, str],
+) -> list[str]:
+    """Compute a book's new authors list by applying author.merge renames.
+
+    ``changes`` maps casefolded source-name to canonical.  Renames happen
+    in-place; if the canonical is already in the list, the source is dropped
+    rather than duplicated.  Case-insensitive dedupe across the result.
+    """
+    seen_ci: set[str] = set()
+    out: list[str] = []
+    for name in current:
+        cf = name.casefold()
+        if cf in changes:
+            canonical = changes[cf]
+            canon_cf = canonical.casefold()
+            if canon_cf in seen_ci:
+                continue  # canonical already present — drop the variant
+            out.append(canonical)
+            seen_ci.add(canon_cf)
+        else:
+            if cf in seen_ci:
+                continue
+            out.append(name)
+            seen_ci.add(cf)
+    return out
+
+
+def _format_authors(authors: list[str]) -> str:
+    """Render the authors list in calibredb's ``"Author A & Author B"`` format."""
+    return " & ".join(authors)
 
 
 def _apply_tag_ops(
@@ -378,6 +469,7 @@ def execute(
     affected book's command succeeded; partial failures leave them as
     ``approved`` (so a re-run will retry the survivors)."""
     tag_op_outcomes: dict[int, list[bool]] = defaultdict(list)
+    author_op_outcomes: dict[int, list[bool]] = defaultdict(list)
     try:
         for cmd in commands:
             try:
@@ -391,6 +483,8 @@ def execute(
                 _mark_failed(conn, cmd.proposal_ids, f"{type(exc).__name__}: {exc}")
                 for tag_op_id in cmd.tag_op_proposal_ids:
                     tag_op_outcomes[tag_op_id].append(False)
+                for author_op_id in cmd.author_op_proposal_ids:
+                    author_op_outcomes[author_op_id].append(False)
                 yield ApplyResult(
                     command=cmd,
                     ok=False,
@@ -413,6 +507,8 @@ def execute(
                     )
             for tag_op_id in cmd.tag_op_proposal_ids:
                 tag_op_outcomes[tag_op_id].append(ok)
+            for author_op_id in cmd.author_op_proposal_ids:
+                author_op_outcomes[author_op_id].append(ok)
             ar = ApplyResult(
                 command=cmd,
                 ok=ok,
@@ -424,18 +520,18 @@ def execute(
                 on_result(ar)
             yield ar
     finally:
-        # Tag-op proposals: mark applied only when every affected book's
-        # command succeeded. Otherwise leave as approved so a re-run picks
-        # up the survivors. Notes carry the failure breakdown either way.
-        for tag_op_id, results in tag_op_outcomes.items():
+        # Tag-op and author-op proposals: mark applied only when every
+        # affected book's command succeeded. Otherwise leave as approved
+        # so a re-run picks up the survivors.
+        for op_id, results in [*tag_op_outcomes.items(), *author_op_outcomes.items()]:
             failed = sum(1 for r in results if not r)
             if failed == 0:
-                _mark_applied(conn, [tag_op_id])
+                _mark_applied(conn, [op_id])
             else:
                 conn.execute(
                     "UPDATE proposals SET notes = COALESCE(notes || '; ', '') || ? "
                     "WHERE id = ? AND status='approved'",
-                    (f"apply: {failed}/{len(results)} per-book commands failed", tag_op_id),
+                    (f"apply: {failed}/{len(results)} per-book commands failed", op_id),
                 )
 
 

@@ -64,6 +64,8 @@ def main(argv: list[str] | None = None) -> int:
         return _cmd_cookbooks(args)
     if args.cmd == "miner" and args.subcmd == "cookbooks-review":
         return _cmd_cookbooks_review(args)
+    if args.cmd == "miner" and args.subcmd == "author-sweep":
+        return _cmd_author_sweep(args)
     parser.print_help()
     return 2
 
@@ -239,6 +241,14 @@ def _build_parser() -> argparse.ArgumentParser:
         "--status", default="proposed",
         help="Proposal status to review (default: proposed)",
     )
+
+    asw = msub.add_parser(
+        "author-sweep",
+        help="Phase 6a: find punctuation-variant author clusters and propose merges",
+    )
+    asw.add_argument("--metadata-db", type=Path, required=True, help="Calibre metadata.db (read-only)")
+    asw.add_argument("--proposals-db", type=Path, required=True)
+    asw.add_argument("--dry-run", action="store_true", help="Show clusters without persisting proposals")
 
     for verb, help_text in [
         ("approve", "Mark matching proposals as approved (ready to apply)"),
@@ -704,6 +714,51 @@ def _cmd_refresh(args: argparse.Namespace) -> int:
         "\n[dim]Next: review with [bold]miner review[/bold] / approve, then "
         "[bold]miner apply --execute[/bold] (rw mount + Calibre-Web stop required for apply).[/dim]"
     )
+    return 0
+
+
+def _cmd_author_sweep(args: argparse.Namespace) -> int:
+    from calibre_mcp.cleanup import author_normalizer
+
+    console = Console()
+    console.print(
+        f"[bold]Author sweep[/bold]  calibre=[cyan]{args.metadata_db}[/cyan]  "
+        f"dry_run=[yellow]{args.dry_run}[/yellow]"
+    )
+
+    summary, decisions = author_normalizer.run(
+        calibre_db=args.metadata_db,
+        proposals_db=args.proposals_db,
+        dry_run=args.dry_run,
+    )
+
+    table = Table(title="Author sweep summary")
+    table.add_column("metric")
+    table.add_column("value", justify="right")
+    table.add_row("authors scanned", str(summary.examined))
+    table.add_row("variant clusters found", str(summary.clusters))
+    table.add_row("author.merge proposals emitted", str(summary.merges))
+    console.print(table)
+
+    if decisions:
+        detail = Table(
+            title=f"Proposed merges ({'dry-run, not saved' if args.dry_run else 'saved to DB'})",
+            show_lines=False,
+        )
+        detail.add_column("variant (will be renamed)", max_width=40, overflow="fold")
+        detail.add_column("→ canonical", max_width=40, overflow="fold")
+        detail.add_column("books", justify="right")
+        for d in sorted(decisions, key=lambda x: (x.canonical.casefold(), x.src_name.casefold())):
+            detail.add_row(d.src_name, d.canonical, str(d.book_count))
+        console.print(detail)
+
+    if not args.dry_run and decisions:
+        console.print(
+            "\n[dim]Next: review above, reject any that look wrong, then "
+            "[bold]miner approve --field author.merge --source author_normalizer --yes[/bold], "
+            "then apply with [bold]scripts/apply_with_progress.py --source author_normalizer[/bold] "
+            "(rw mount + Calibre-Web stop required).[/dim]"
+        )
     return 0
 
 
