@@ -134,6 +134,14 @@ def _build_parser() -> argparse.ArgumentParser:
         default=None,
         help="Calibre metadata.db (optional — enables book title/author in the UI)",
     )
+    web.add_argument(
+        "--library-root",
+        type=Path,
+        default=None,
+        help="Calibre library root (containing book folders with cover.jpg). "
+             "Defaults to the parent dir of --calibre-db. Enables cover thumbnails "
+             "on the cookbook dashboard.",
+    )
     web.add_argument("--host", default="127.0.0.1")
     web.add_argument("--port", type=int, default=8090)
 
@@ -424,6 +432,7 @@ def _cmd_web(args: argparse.Namespace) -> int:
     web_mod.serve(
         proposals_db=args.proposals_db,
         calibre_db=args.calibre_db,
+        library_root=args.library_root,
         host=args.host,
         port=args.port,
     )

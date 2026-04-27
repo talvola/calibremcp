@@ -21,10 +21,10 @@ from pathlib import Path
 from typing import Any
 
 from fastapi import FastAPI, Form, HTTPException, Query, Request
-from fastapi.responses import HTMLResponse, RedirectResponse
+from fastapi.responses import FileResponse, HTMLResponse, RedirectResponse
 from jinja2 import BaseLoader, Environment, select_autoescape
 
-from calibre_mcp.cleanup import proposals
+from calibre_mcp.cleanup import cookbook_tagger, proposals
 
 # ---------------------------------------------------------------------------
 # Templates
@@ -68,6 +68,29 @@ _STYLE = """
   .book { font-size: 12.5px; }
   .book .title { font-weight: 600; }
   .book .authors { color: #555; }
+  /* Cookbook dashboard */
+  .facet-section { margin: 16px 0 28px; }
+  .facet-section h2 { color: #b36200; }
+  .tag-group { background: #fff; border: 1px solid #ddd; border-radius: 6px;
+               padding: 12px 14px; margin: 10px 0; }
+  .tag-group h3 { margin: 0 0 8px; font-size: 15px; }
+  .tag-group h3 a { color: #0366d6; text-decoration: none; }
+  .tag-group .count { color: #888; font-weight: normal; font-size: 13px;
+                       margin-left: 6px; }
+  .tag-group .actions { float: right; }
+  .grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(110px, 1fr));
+          gap: 10px; margin-top: 8px; }
+  .card { border: 1px solid #e1e4e8; border-radius: 4px; padding: 6px;
+          background: #fafbfc; text-align: center; font-size: 11.5px; }
+  .card img { display: block; max-width: 100px; max-height: 140px;
+              margin: 0 auto 4px; border-radius: 2px; }
+  .card .ttitle { font-weight: 600; line-height: 1.3;
+                   overflow: hidden; max-height: 2.6em;
+                   text-overflow: ellipsis; }
+  .card .conf { color: #888; }
+  .card.confidence-low { border-color: #f2c97a; background: #fff8e6; }
+  .row-cover { width: 60px; max-height: 90px; display: inline-block;
+               vertical-align: middle; margin-right: 8px; }
 </style>
 """
 
@@ -75,6 +98,7 @@ _NAV = """
 <nav>
   <a href="/" class="{{ 'active' if route == 'dashboard' else '' }}">Dashboard</a>
   <a href="/proposals" class="{{ 'active' if route == 'list' else '' }}">Proposals</a>
+  <a href="/cookbooks" class="{{ 'active' if route == 'cookbooks' else '' }}">Cookbooks</a>
   {% if current_filter %}<span class="dim">({{ current_filter }})</span>{% endif %}
 </nav>
 <hr>
@@ -155,6 +179,9 @@ TEMPLATE_LIST = (
   <label>book_id
     <input type="number" name="book_id" value="{{ filter_book_id or '' }}" size="8">
   </label>
+  <label>tag (proposed value)
+    <input type="text" name="proposed_value" value="{{ filter_proposed_value or '' }}" size="14">
+  </label>
   <label>page size
     <select name="size">
       {% for s in [25, 50, 100, 200, 500] %}
@@ -171,12 +198,13 @@ TEMPLATE_LIST = (
   {% if total == 0 %}— nothing to review.{% endif %}
 </p>
 
-{% if filter_field or filter_status or filter_source or filter_book_id %}
+{% if filter_field or filter_status or filter_source or filter_book_id or filter_proposed_value %}
 <form class="bulk" method="post" action="/bulk">
   <input type="hidden" name="field"   value="{{ filter_field or '' }}">
   <input type="hidden" name="status"  value="{{ filter_status or '' }}">
   <input type="hidden" name="source"  value="{{ filter_source or '' }}">
   <input type="hidden" name="book_id" value="{{ filter_book_id or '' }}">
+  <input type="hidden" name="proposed_value" value="{{ filter_proposed_value or '' }}">
   <input type="hidden" name="return_to" value="{{ request_url }}">
   <strong>Bulk</strong> for the {{ total }} matching proposals:
   <button type="submit" class="approve" name="action" value="approved">Approve all</button>
@@ -247,9 +275,84 @@ TEMPLATE_LIST = (
 )
 
 
+TEMPLATE_COOKBOOKS = (
+    "<!doctype html><html><head><title>Cookbooks — Calibre Cleanup</title>"
+    + _STYLE
+    + "</head><body>"
+    + _NAV
+    + """
+<h1>Cookbook proposals by tag <span class="dim">(status={{ status }})</span></h1>
+
+<form class="filters" method="get" action="/cookbooks">
+  <label>status
+    <select name="status">
+      {% for s in ['proposed', 'approved', 'rejected', 'applied'] %}
+      <option value="{{ s }}" {% if s == status %}selected{% endif %}>{{ s }}</option>
+      {% endfor %}
+    </select>
+  </label>
+  <button type="submit">Apply</button>
+</form>
+
+{% if not facets %}
+<p class="dim">No cookbook_llm proposals at status={{ status }} yet. Run
+<code>miner cookbooks</code> first.</p>
+{% endif %}
+
+{% for facet_name, groups in facets.items() %}
+{% if groups %}
+<div class="facet-section">
+<h2>{{ facet_name }} <span class="dim">({{ groups|length }} tags,
+    {{ groups|sum(attribute='n_books') }} proposals)</span></h2>
+
+{% for g in groups %}
+<div class="tag-group">
+  {% if status == 'proposed' %}
+  <form class="actions" method="post" action="/bulk">
+    <input type="hidden" name="source" value="cookbook_llm">
+    <input type="hidden" name="proposed_value" value="{{ g.tag }}">
+    <input type="hidden" name="status" value="proposed">
+    <input type="hidden" name="return_to" value="{{ request_url }}">
+    <button type="submit" class="approve" name="action" value="approved">
+      Approve all {{ g.n_books }}
+    </button>
+    <button type="submit" class="reject" name="action" value="rejected">
+      Reject all
+    </button>
+  </form>
+  {% endif %}
+  <h3>
+    <a href="/proposals?source=cookbook_llm&proposed_value={{ g.tag|urlencode }}&status={{ status }}">
+      {{ g.tag }}</a>
+    <span class="count">{{ g.n_books }} books</span>
+  </h3>
+  <div class="grid">
+    {% for book in g.books %}
+    <div class="card{% if book.confidence < 0.7 %} confidence-low{% endif %}">
+      {% if has_covers %}
+      <a href="/proposals?book_id={{ book.book_id }}">
+        <img src="/cover/{{ book.book_id }}.jpg" loading="lazy"
+             alt="{{ book.title }}">
+      </a>
+      {% endif %}
+      <div class="ttitle" title="{{ book.title }}">{{ book.title }}</div>
+      <div class="conf">{{ '%.1f' % book.confidence }}</div>
+    </div>
+    {% endfor %}
+  </div>
+</div>
+{% endfor %}
+</div>
+{% endif %}
+{% endfor %}
+</body></html>
+"""
+)
+
 _JINJA = Environment(loader=BaseLoader(), autoescape=select_autoescape(["html"]))
 _DASHBOARD_TMPL = _JINJA.from_string(TEMPLATE_DASHBOARD)
 _LIST_TMPL = _JINJA.from_string(TEMPLATE_LIST)
+_COOKBOOKS_TMPL = _JINJA.from_string(TEMPLATE_COOKBOOKS)
 
 
 # ---------------------------------------------------------------------------
@@ -261,6 +364,27 @@ _LIST_TMPL = _JINJA.from_string(TEMPLATE_LIST)
 class BookContext:
     title: str
     authors: str  # joined with " & "
+
+
+class _BookPathLoader:
+    """Lazily resolve the ``books.path`` column for cover-image lookup. The
+    cover for book ``B`` lives at ``library_root / B.path / cover.jpg``."""
+
+    def __init__(self, calibre_db: Path | None) -> None:
+        self._calibre_db = calibre_db
+        self._cache: dict[int, str] = {}
+
+    def get(self, book_id: int) -> str | None:
+        if self._calibre_db is None:
+            return None
+        if book_id in self._cache:
+            return self._cache[book_id] or None
+        uri = f"file:{self._calibre_db.resolve()}?mode=ro"
+        with sqlite3.connect(uri, uri=True) as conn:
+            row = conn.execute("SELECT path FROM books WHERE id=?", (book_id,)).fetchone()
+        path = (row[0] if row else "") or ""
+        self._cache[book_id] = path
+        return path or None
 
 
 class _BookContextLoader:
@@ -311,9 +435,24 @@ class _BookContextLoader:
 # ---------------------------------------------------------------------------
 
 
-def create_app(*, proposals_db: Path, calibre_db: Path | None = None) -> FastAPI:
+def create_app(
+    *,
+    proposals_db: Path,
+    calibre_db: Path | None = None,
+    library_root: Path | None = None,
+) -> FastAPI:
+    """Construct the FastAPI app.
+
+    ``library_root`` is the directory containing the Calibre book folders
+    (where each book has a ``cover.jpg``). When provided, the cookbook
+    dashboard renders cover thumbnails. If omitted but ``calibre_db`` is
+    set, defaults to ``calibre_db.parent`` — that's the standard Calibre
+    layout (metadata.db lives at the library root)."""
     app = FastAPI(title="Calibre Cleanup Review", docs_url=None, redoc_url=None)
     loader = _BookContextLoader(calibre_db)
+    if library_root is None and calibre_db is not None:
+        library_root = calibre_db.parent
+    book_paths = _BookPathLoader(calibre_db) if library_root else None
 
     def _conn() -> sqlite3.Connection:
         return proposals.connect(proposals_db)
@@ -347,6 +486,7 @@ def create_app(*, proposals_db: Path, calibre_db: Path | None = None) -> FastAPI
         status: str | None = Query(None),
         source: str | None = Query(None),
         book_id: int | None = Query(None),
+        proposed_value: str | None = Query(None),
         page: int = Query(1, ge=1),
         size: int = Query(50, ge=1, le=500),
     ) -> str:
@@ -356,6 +496,7 @@ def create_app(*, proposals_db: Path, calibre_db: Path | None = None) -> FastAPI
                 "field": field or None,
                 "status": status or None,
                 "source": source or None,
+                "proposed_value": proposed_value or None,
             }.items()
             if v
         }
@@ -365,7 +506,7 @@ def create_app(*, proposals_db: Path, calibre_db: Path | None = None) -> FastAPI
             # move to keyset pagination.
             where_clauses: list[str] = ["1=1"]
             params: list[Any] = []
-            for key in ("field", "status", "source"):
+            for key in ("field", "status", "source", "proposed_value"):
                 if filters.get(key):
                     where_clauses.append(f"{key} = ?")
                     params.append(filters[key])
@@ -424,6 +565,7 @@ def create_app(*, proposals_db: Path, calibre_db: Path | None = None) -> FastAPI
             filter_status=status,
             filter_source=source,
             filter_book_id=book_id,
+            filter_proposed_value=proposed_value,
             all_fields=all_fields,
             all_statuses=all_statuses,
             page_range=page_range,
@@ -431,6 +573,85 @@ def create_app(*, proposals_db: Path, calibre_db: Path | None = None) -> FastAPI
             request_url=str(request.url),
             current_filter=", ".join(filter_label_parts) or None,
         )
+
+    @app.get("/cookbooks", response_class=HTMLResponse)
+    def cookbooks_view(request: Request, status: str = Query("proposed")) -> str:
+        """Per-tag dashboard for cookbook_llm proposals. Groups by facet
+        (cuisine / technique / dietary) using the taxonomy module's enums,
+        then by individual tag within each facet."""
+        with _conn() as conn:
+            rows = conn.execute(
+                """
+                SELECT proposed_value AS tag, book_id, confidence
+                FROM proposals
+                WHERE source = 'cookbook_llm' AND field = 'tags.add'
+                  AND status = ? AND proposed_value != '(no tags)'
+                ORDER BY proposed_value, confidence DESC
+                """,
+                (status,),
+            ).fetchall()
+
+        # Build facet-aware groupings using the taxonomy enums.
+        cuisines = set(cookbook_tagger.CuisineTag.__args__)  # type: ignore[attr-defined]
+        techniques = set(cookbook_tagger.TechniqueTag.__args__)  # type: ignore[attr-defined]
+        dietaries = set(cookbook_tagger.DietaryTag.__args__)  # type: ignore[attr-defined]
+
+        # Aggregate: tag → list of (book_id, confidence)
+        per_tag: dict[str, list[tuple[int, float]]] = {}
+        for r in rows:
+            per_tag.setdefault(r["tag"], []).append((r["book_id"], r["confidence"]))
+
+        # Pull book titles in one batch for cards.
+        all_book_ids = {bid for items in per_tag.values() for bid, _ in items}
+        ctx_map = loader.get(all_book_ids)
+
+        def _build_groups(tag_set: set[str]) -> list[dict]:
+            out = []
+            for tag, items in per_tag.items():
+                if tag not in tag_set:
+                    continue
+                # Sort books within a group by confidence desc — high-conf
+                # first lets Erik scan the obvious ones quickly.
+                items_sorted = sorted(items, key=lambda x: -x[1])
+                books = [
+                    {
+                        "book_id": bid,
+                        "title": ctx_map[bid].title if bid in ctx_map else f"#{bid}",
+                        "confidence": conf,
+                    }
+                    for bid, conf in items_sorted
+                ]
+                out.append({"tag": tag, "n_books": len(books), "books": books})
+            out.sort(key=lambda g: -g["n_books"])
+            return out
+
+        facets = {
+            "Cuisine": _build_groups(cuisines),
+            "Technique": _build_groups(techniques),
+            "Dietary": _build_groups(dietaries),
+        }
+
+        return _COOKBOOKS_TMPL.render(
+            route="cookbooks",
+            status=status,
+            facets=facets,
+            has_covers=book_paths is not None,
+            request_url=str(request.url),
+            current_filter=f"status={status}",
+        )
+
+    @app.get("/cover/{book_id}.jpg")
+    def cover(book_id: int) -> FileResponse:
+        """Stream the cover.jpg for a book. Returns 404 if missing."""
+        if library_root is None or book_paths is None:
+            raise HTTPException(status_code=404, detail="library_root not configured")
+        book_dir = book_paths.get(book_id)
+        if not book_dir:
+            raise HTTPException(status_code=404, detail=f"no path for book {book_id}")
+        cover_file = library_root / book_dir / "cover.jpg"
+        if not cover_file.is_file():
+            raise HTTPException(status_code=404, detail="no cover")
+        return FileResponse(cover_file, media_type="image/jpeg")
 
     @app.post("/proposals/{proposal_id}/status")
     def set_status(
@@ -454,6 +675,7 @@ def create_app(*, proposals_db: Path, calibre_db: Path | None = None) -> FastAPI
         status: str = Form(""),
         source: str = Form(""),
         book_id: str = Form(""),
+        proposed_value: str = Form(""),
         notes: str = Form(""),
         return_to: str = Form("/proposals"),
     ) -> RedirectResponse:
@@ -476,6 +698,7 @@ def create_app(*, proposals_db: Path, calibre_db: Path | None = None) -> FastAPI
                 field=field or None,
                 status=status or None,
                 source=source or None,
+                proposed_value=proposed_value or None,
                 ids=ids,
                 notes=notes or None,
             )
@@ -488,11 +711,14 @@ def serve(
     *,
     proposals_db: Path,
     calibre_db: Path | None = None,
+    library_root: Path | None = None,
     host: str = "127.0.0.1",
     port: int = 8090,
 ) -> None:
     """Run the webapp with uvicorn (blocks until interrupted)."""
     import uvicorn
 
-    app = create_app(proposals_db=proposals_db, calibre_db=calibre_db)
+    app = create_app(
+        proposals_db=proposals_db, calibre_db=calibre_db, library_root=library_root,
+    )
     uvicorn.run(app, host=host, port=port, log_level="info")

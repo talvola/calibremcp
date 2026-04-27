@@ -203,3 +203,162 @@ def test_bulk_respects_book_id_filter(client: TestClient, seeded_db: Path) -> No
     assert all(r["status"] == "rejected" for r in rows)
     # Other books untouched.
     assert not any(r["status"] == "rejected" for r in other)
+
+
+# ---------------------------------------------------------------------------
+# Cookbook dashboard + cover route + proposed_value filter
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture
+def cookbook_db(tmp_path: Path) -> Path:
+    """Seed a propose-queue with cookbook_llm proposals across multiple
+    facets so the /cookbooks dashboard has something to render."""
+    db_path = tmp_path / "cookbook.db"
+    conn = proposals.connect(db_path)
+    run_id = proposals.start_run(
+        conn, source="cookbook_llm",
+        library_root=Path("/tmp/library"),  # noqa: S108
+        metadata_db_path=Path("/tmp/library/metadata.db"),  # noqa: S108
+        dry_run=False,
+    )
+    seed = [
+        Proposal(book_id=1, field="tags.add", proposed_value="Italian", source="cookbook_llm", confidence=0.9),
+        Proposal(book_id=2, field="tags.add", proposed_value="Italian", source="cookbook_llm", confidence=0.7),
+        Proposal(book_id=3, field="tags.add", proposed_value="Korean", source="cookbook_llm", confidence=0.9),
+        Proposal(book_id=4, field="tags.add", proposed_value="Baking", source="cookbook_llm", confidence=0.9),
+        Proposal(book_id=5, field="tags.add", proposed_value="Vegan", source="cookbook_llm", confidence=0.9),
+        # Sentinel must be excluded from the dashboard.
+        Proposal(book_id=6, field="tags.add", proposed_value="(no tags)", source="cookbook_llm", confidence=0.7),
+    ]
+    for p in seed:
+        proposals.insert_proposal(conn, run_id, p)
+    conn.close()
+    return db_path
+
+
+def test_cookbooks_dashboard_groups_by_facet(cookbook_db: Path) -> None:
+    """Italian + Korean go under Cuisine, Baking under Technique, Vegan
+    under Dietary."""
+    client = TestClient(create_app(proposals_db=cookbook_db))
+    r = client.get("/cookbooks")
+    assert r.status_code == 200
+    body = r.text
+    assert "Cuisine" in body
+    assert "Technique" in body
+    assert "Dietary" in body
+    assert "Italian" in body
+    assert "Korean" in body
+    assert "Baking" in body
+    assert "Vegan" in body
+
+
+def test_cookbooks_dashboard_excludes_sentinel(cookbook_db: Path) -> None:
+    """The (no tags) sentinel is an internal skip marker; it must not
+    appear as a tag group in the review UI."""
+    client = TestClient(create_app(proposals_db=cookbook_db))
+    body = client.get("/cookbooks").text
+    assert "(no tags)" not in body
+
+
+def test_cookbooks_dashboard_shows_book_counts(cookbook_db: Path) -> None:
+    """Italian has 2 books in the seed, Korean / Baking / Vegan have 1 each."""
+    client = TestClient(create_app(proposals_db=cookbook_db))
+    body = client.get("/cookbooks").text
+    # Italian's "2 books" should appear; check the encoded form.
+    assert "2 books" in body
+    assert "1 books" in body
+
+
+def test_cookbooks_dashboard_links_to_filtered_proposals(cookbook_db: Path) -> None:
+    """Tag headings link to the per-tag /proposals view via proposed_value."""
+    client = TestClient(create_app(proposals_db=cookbook_db))
+    body = client.get("/cookbooks").text
+    assert "proposed_value=Italian" in body
+    assert "proposed_value=Korean" in body
+
+
+def test_proposals_filter_by_proposed_value(cookbook_db: Path) -> None:
+    """The new --proposed-value-equivalent URL filter narrows to one tag."""
+    client = TestClient(create_app(proposals_db=cookbook_db))
+    r = client.get("/proposals?proposed_value=Italian")
+    assert r.status_code == 200
+    # Both Italian rows match (book 1 and 2).
+    # Korean / Baking / Vegan must be absent.
+    assert "Italian" in r.text
+    assert "Korean" not in r.text
+    assert "Baking" not in r.text
+
+
+def test_bulk_approve_by_proposed_value(cookbook_db: Path) -> None:
+    """The killer cookbook UX: bulk-approve every Italian proposal at
+    once via the /cookbooks page → /bulk POST."""
+    client = TestClient(create_app(proposals_db=cookbook_db))
+    r = client.post(
+        "/bulk",
+        data={
+            "action": "approved",
+            "source": "cookbook_llm",
+            "proposed_value": "Italian",
+            "status": "proposed",
+        },
+        follow_redirects=False,
+    )
+    assert r.status_code == 303
+    with sqlite3.connect(cookbook_db) as conn:
+        n_italian = conn.execute(
+            "SELECT COUNT(*) FROM proposals WHERE proposed_value='Italian' AND status='approved'"
+        ).fetchone()[0]
+        n_other = conn.execute(
+            "SELECT COUNT(*) FROM proposals WHERE proposed_value!='Italian' AND status='approved'"
+        ).fetchone()[0]
+    assert n_italian == 2
+    assert n_other == 0
+
+
+def test_cover_route_404_when_no_library_root(cookbook_db: Path) -> None:
+    """No --library-root configured → cover requests return 404 cleanly."""
+    client = TestClient(create_app(proposals_db=cookbook_db))
+    r = client.get("/cover/1.jpg")
+    assert r.status_code == 404
+
+
+def test_cover_route_serves_jpeg(tmp_path: Path) -> None:
+    """End-to-end: write a fake cover.jpg into a synthetic library, ensure
+    the route streams it back with image/jpeg."""
+    # Stand up a minimal Calibre DB just for the path lookup.
+    metadata_db = tmp_path / "library" / "metadata.db"
+    metadata_db.parent.mkdir(parents=True)
+    conn = sqlite3.connect(metadata_db)
+    conn.execute("CREATE TABLE books (id INTEGER PRIMARY KEY, path TEXT)")
+    conn.execute("INSERT INTO books (id, path) VALUES (1, 'Author/Book')")
+    conn.commit()
+    conn.close()
+    cover = tmp_path / "library" / "Author" / "Book" / "cover.jpg"
+    cover.parent.mkdir(parents=True)
+    cover.write_bytes(b"\xff\xd8\xff\xe0fake jpeg bytes")
+
+    pdb = tmp_path / "p.db"
+    pc = proposals.connect(pdb)
+    pc.close()
+    client = TestClient(create_app(
+        proposals_db=pdb, calibre_db=metadata_db,  # library_root auto-derives
+    ))
+    r = client.get("/cover/1.jpg")
+    assert r.status_code == 200
+    assert r.headers["content-type"] == "image/jpeg"
+    assert b"fake jpeg bytes" in r.content
+
+
+def test_cover_route_404_for_unknown_book(tmp_path: Path) -> None:
+    metadata_db = tmp_path / "library" / "metadata.db"
+    metadata_db.parent.mkdir(parents=True)
+    conn = sqlite3.connect(metadata_db)
+    conn.execute("CREATE TABLE books (id INTEGER PRIMARY KEY, path TEXT)")
+    conn.commit()
+    conn.close()
+    pdb = tmp_path / "p.db"
+    pc = proposals.connect(pdb)
+    pc.close()
+    client = TestClient(create_app(proposals_db=pdb, calibre_db=metadata_db))
+    assert client.get("/cover/9999.jpg").status_code == 404
