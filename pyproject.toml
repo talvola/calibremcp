@@ -45,6 +45,7 @@ dependencies = [
     "lxml>=5.1.0", # Robust XML parsing for arXiv Atom feed
     "prefab-ui>=0.14.0", # MCP Apps (Prefab) — required for show_*_prefab_card tools
     "jinja2>=3.1.6",
+    "anthropic>=0.97.0",
 ]
 
 [project.optional-dependencies]

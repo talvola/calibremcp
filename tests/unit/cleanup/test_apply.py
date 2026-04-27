@@ -461,6 +461,29 @@ def test_set_status_where_stores_notes(db) -> None:
     assert row["notes"] == "wrong edition"
 
 
+def test_set_status_where_filters_by_proposed_value(db) -> None:
+    """The --proposed-value filter (added for bulk per-cuisine approve in
+    the cookbook pipeline) targets the exact tag-name across many books."""
+    _seed(db, 1, "tags.add", "Italian", status="proposed")
+    _seed(db, 2, "tags.add", "Italian", status="proposed")
+    _seed(db, 3, "tags.add", "Korean", status="proposed")
+    n = proposals.set_status_where(
+        db, "approved", proposed_value="Italian", status="proposed",
+    )
+    assert n == 2
+    # Korean untouched.
+    assert proposals.count_proposals(db, proposed_value="Korean", status="proposed") == 1
+
+
+def test_count_proposals_filters_by_proposed_value(db) -> None:
+    _seed(db, 1, "tags.add", "Italian")
+    _seed(db, 2, "tags.add", "Italian")
+    _seed(db, 3, "tags.add", "French")
+    assert proposals.count_proposals(db, proposed_value="Italian") == 2
+    assert proposals.count_proposals(db, proposed_value="French") == 1
+    assert proposals.count_proposals(db, proposed_value="Korean") == 0
+
+
 # ---------------------------------------------------------------------------
 # Tag-level ops (tag.delete / tag.merge): plan() expansion + execute()
 # ---------------------------------------------------------------------------

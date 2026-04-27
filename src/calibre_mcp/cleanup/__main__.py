@@ -60,6 +60,10 @@ def main(argv: list[str] | None = None) -> int:
         return _cmd_normalize_tags(args)
     if args.cmd == "miner" and args.subcmd == "refresh":
         return _cmd_refresh(args)
+    if args.cmd == "miner" and args.subcmd == "cookbooks":
+        return _cmd_cookbooks(args)
+    if args.cmd == "miner" and args.subcmd == "cookbooks-review":
+        return _cmd_cookbooks_review(args)
     parser.print_help()
     return 2
 
@@ -183,6 +187,41 @@ def _build_parser() -> argparse.ArgumentParser:
         help="After the refresh, list every proposal attached to the runs just executed.",
     )
 
+    cb = msub.add_parser(
+        "cookbooks",
+        help="Phase 5a: LLM-tag the Cookbooks bucket with cuisine/technique/dietary facets",
+    )
+    cb.add_argument("--library", type=Path, required=True, help="Calibre library root")
+    cb.add_argument("--metadata-db", type=Path, required=True, help="Path to metadata.db")
+    cb.add_argument("--proposals-db", type=Path, required=True)
+    cb.add_argument(
+        "--bucket-tag", default="Cookbooks",
+        help="Tag identifying the bucket to walk (default: Cookbooks)",
+    )
+    cb.add_argument(
+        "--limit", type=int, default=None,
+        help="Stop after N books (useful for proof-of-concept / cost cap)",
+    )
+    cb.add_argument(
+        "--book-id", type=int, action="append", dest="book_ids", default=None,
+        help="Restrict to specific book IDs (repeat for multiple); skips bucket-tag filter",
+    )
+    cb.add_argument(
+        "--retag", action="store_true",
+        help="Re-tag books that already have cookbook_llm proposals (default: skip)",
+    )
+
+    cbr = msub.add_parser(
+        "cookbooks-review",
+        help="Group cookbook_llm proposals by tag for per-cuisine review + bulk approve",
+    )
+    cbr.add_argument("--proposals-db", type=Path, required=True)
+    cbr.add_argument("--metadata-db", type=Path, required=True)
+    cbr.add_argument(
+        "--status", default="proposed",
+        help="Proposal status to review (default: proposed)",
+    )
+
     for verb, help_text in [
         ("approve", "Mark matching proposals as approved (ready to apply)"),
         ("reject", "Mark matching proposals as rejected (ignored by apply)"),
@@ -206,6 +245,11 @@ def _build_parser() -> argparse.ArgumentParser:
         ap.add_argument("--source", default=None, help="Filter by source")
         ap.add_argument("--min-confidence", type=float, default=None)
         ap.add_argument("--max-confidence", type=float, default=None)
+        ap.add_argument(
+            "--proposed-value", default=None,
+            help="Filter by exact proposed_value (e.g. 'Italian' to bulk-approve all "
+                 "Italian cookbook proposals)",
+        )
         ap.add_argument("--notes", default=None, help="Reviewer note stored on the row")
         ap.add_argument("--yes", "-y", action="store_true", help="Skip the count-and-confirm prompt")
 
@@ -473,13 +517,15 @@ def _cmd_set_status(args: argparse.Namespace, new_status: str) -> int:
         "ids": args.ids,
         "min_confidence": args.min_confidence,
         "max_confidence": args.max_confidence,
+        "proposed_value": args.proposed_value,
     }
 
     # Refuse unfiltered bulk updates — the DB layer also guards, but give
     # a friendlier message here.
     if not any(filter_kwargs.values()):
         console.print(
-            "[red]No filter specified.[/red] Pass --id, --field, --status, --source, or --min/max-confidence.",
+            "[red]No filter specified.[/red] Pass --id, --field, --status, --source, "
+            "--proposed-value, or --min/max-confidence.",
         )
         return 2
 
@@ -504,6 +550,81 @@ def _cmd_set_status(args: argparse.Namespace, new_status: str) -> int:
                 return 1
         changed = proposals.set_status_where(conn, new_status, notes=args.notes, **filter_kwargs)
         console.print(f"[green]{new_status}[/green] {changed} proposal(s).")
+    return 0
+
+
+def _cmd_cookbooks(args: argparse.Namespace) -> int:
+    from calibre_mcp.cleanup import cookbooks as cookbooks_mod
+    console = Console()
+    scope_desc = (
+        f"book_ids={args.book_ids}" if args.book_ids
+        else f"tag={args.bucket_tag!r}"
+        + (f" limit={args.limit}" if args.limit else "")
+    )
+    console.print(
+        f"[bold]Cookbook tagger[/bold]  {scope_desc}  "
+        f"retag=[yellow]{args.retag}[/yellow]"
+    )
+    summary = cookbooks_mod.run(
+        library_root=args.library,
+        metadata_db=args.metadata_db,
+        proposals_db=args.proposals_db,
+        bucket_tag=args.bucket_tag,
+        limit=args.limit,
+        book_ids=args.book_ids,
+        skip_already_tagged=not args.retag,
+    )
+    table = Table(title="Cookbook tagger summary")
+    table.add_column("metric")
+    table.add_column("value", justify="right")
+    table.add_row("examined", str(summary.examined))
+    table.add_row("[dim]skipped (already tagged)[/dim]", str(summary.skipped_already_tagged))
+    table.add_row("[green]tagged[/green]", str(summary.tagged))
+    table.add_row("[red]API errors[/red]", str(summary.api_errors))
+    table.add_row("proposals emitted", str(summary.proposals_emitted))
+    table.add_row("elapsed", f"{summary.elapsed_sec:.0f}s")
+    console.print(table)
+    console.print(
+        "\n[dim]Next: [bold]miner cookbooks-review[/bold] for per-cuisine grouping, "
+        "then [bold]miner approve --field tags.add --source cookbook_llm --id ...[/bold].[/dim]"
+    )
+    return 0
+
+
+def _cmd_cookbooks_review(args: argparse.Namespace) -> int:
+    from calibre_mcp.cleanup import cookbooks as cookbooks_mod
+    console = Console()
+    groups = cookbooks_mod.report_by_tag(
+        proposals_db=args.proposals_db,
+        metadata_db=args.metadata_db,
+        status=args.status,
+    )
+    if not groups:
+        console.print(f"[dim]No cookbook_llm proposals at status={args.status!r}.[/dim]")
+        return 0
+
+    console.print(f"[bold]Cookbook proposals by tag[/bold] (status={args.status})")
+    table = Table()
+    table.add_column("tag")
+    table.add_column("books", justify="right")
+    table.add_column("samples", overflow="fold", max_width=70)
+    table.add_column("approve cmd", overflow="fold", max_width=80)
+    for g in groups:
+        # Bulk-approve hint: --proposed-value scales better than --id when
+        # the cohort is large.
+        if len(g.proposal_ids) <= 3:
+            ids_str = " ".join(f"--id {i}" for i in g.proposal_ids)
+        else:
+            ids_str = f"--source cookbook_llm --proposed-value '{g.tag}'"
+        samples = "; ".join(g.sample_titles[:3])
+        if len(g.sample_titles) < g.n_books:
+            samples += f"; … ({g.n_books - len(g.sample_titles)} more)"
+        table.add_row(g.tag, str(g.n_books), samples, ids_str)
+    console.print(table)
+    console.print(
+        f"\n[dim]Total: {len(groups)} distinct tags across "
+        f"{sum(g.n_books for g in groups)} proposals.[/dim]"
+    )
     return 0
 
 

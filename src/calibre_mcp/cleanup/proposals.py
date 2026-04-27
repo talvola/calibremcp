@@ -193,6 +193,7 @@ def _build_filter_clauses(
     ids: Sequence[int] | None = None,
     min_confidence: float | None = None,
     max_confidence: float | None = None,
+    proposed_value: str | None = None,
 ) -> tuple[str, list[Any]]:
     """Assemble a WHERE-clause fragment (without the ``WHERE`` keyword) and
     bound parameters from the given filters. Returns ``('1=1', [])`` when
@@ -218,6 +219,9 @@ def _build_filter_clauses(
     if max_confidence is not None:
         clauses.append("confidence <= ?")
         params.append(max_confidence)
+    if proposed_value is not None:
+        clauses.append("proposed_value = ?")
+        params.append(proposed_value)
     return (" AND ".join(clauses) if clauses else "1=1"), params
 
 
@@ -230,6 +234,7 @@ def count_proposals(
     ids: Sequence[int] | None = None,
     min_confidence: float | None = None,
     max_confidence: float | None = None,
+    proposed_value: str | None = None,
 ) -> int:
     """Count proposals matching the filters. Used to preview bulk operations."""
     where, params = _build_filter_clauses(
@@ -239,6 +244,7 @@ def count_proposals(
         ids=ids,
         min_confidence=min_confidence,
         max_confidence=max_confidence,
+        proposed_value=proposed_value,
     )
     row = conn.execute(f"SELECT COUNT(*) AS n FROM proposals WHERE {where}", params).fetchone()  # noqa: S608 — {where} is a keyword-only fragment from _build_filter_clauses; values flow via bound params
     return int(row["n"])
@@ -255,6 +261,7 @@ def set_status_where(
     ids: Sequence[int] | None = None,
     min_confidence: float | None = None,
     max_confidence: float | None = None,
+    proposed_value: str | None = None,
 ) -> int:
     """Bulk-update status for proposals matching filters. Returns rowcount.
 
@@ -263,7 +270,7 @@ def set_status_where(
     update the entire table) — callers must pass at least one narrowing arg."""
     if new_status not in _VALID_STATUSES:
         raise ValueError(f"invalid status: {new_status!r}")
-    if all(v is None or v == [] for v in (field, status, source, ids, min_confidence, max_confidence)):
+    if all(v is None or v == [] for v in (field, status, source, ids, min_confidence, max_confidence, proposed_value)):
         raise ValueError("refusing to update without any filter — pass at least one narrowing argument")
     where, params = _build_filter_clauses(
         field=field,
@@ -272,6 +279,7 @@ def set_status_where(
         ids=ids,
         min_confidence=min_confidence,
         max_confidence=max_confidence,
+        proposed_value=proposed_value,
     )
     cur = conn.execute(
         f"""
