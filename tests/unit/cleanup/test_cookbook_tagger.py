@@ -29,28 +29,37 @@ from calibre_mcp.cleanup.cookbook_tagger import (
 
 def test_taxonomy_sizes() -> None:
     """If we add or remove labels, this test breaks deliberately so we
-    notice. Current taxonomy: 20+15+6 = 41 facets (taxonomy v2 — added
-    Spanish, Portuguese, African, Ethiopian to cuisine; Pizza, Tea,
-    Coffee, Wine, Brewing to technique)."""
-    assert len(CuisineTag.__args__) == 20  # type: ignore[attr-defined]
-    assert len(TechniqueTag.__args__) == 15  # type: ignore[attr-defined]
+    notice. Current taxonomy v3: 25+16+6 = 47 facets (added British,
+    German, Eastern European, Scandinavian, Caribbean to cuisine; Spirits
+    to technique)."""
+    assert len(CuisineTag.__args__) == 25  # type: ignore[attr-defined]
+    assert len(TechniqueTag.__args__) == 16  # type: ignore[attr-defined]
     assert len(DietaryTag.__args__) == 6  # type: ignore[attr-defined]
 
 
 def test_iberian_and_african_cuisines_present() -> None:
-    """Erik's taxonomy-v2 fix: Spain/Portugal aren't Mediterranean, and
-    Ethiopia isn't 'just African' — both deserve their own labels.
-    Plus the African umbrella for non-Ethiopian African cuisines."""
+    """Spain/Portugal aren't Mediterranean, and Ethiopia isn't 'just
+    African' — both deserve their own labels."""
     cuisines = set(CuisineTag.__args__)  # type: ignore[attr-defined]
     for required in ("Spanish", "Portuguese", "African", "Ethiopian"):
         assert required in cuisines, f"missing {required!r} in cuisine taxonomy"
 
 
+def test_v3_cuisines_present() -> None:
+    """Taxonomy v3 additions: European specifics (British, German,
+    Eastern European, Scandinavian) and Caribbean (split from Latin
+    American)."""
+    cuisines = set(CuisineTag.__args__)  # type: ignore[attr-defined]
+    for required in ("British", "German", "Eastern European",
+                     "Scandinavian", "Caribbean"):
+        assert required in cuisines, f"missing {required!r} in cuisine taxonomy"
+
+
 def test_beverage_and_pizza_techniques_present() -> None:
-    """Beverage breakdown beyond Cocktails (Tea, Coffee, Wine, Brewing)
-    plus Pizza split out from Bread — taxonomy v2."""
+    """Beverage breakdown beyond Cocktails (Tea, Coffee, Wine, Brewing,
+    Spirits) plus Pizza split out from Bread."""
     techs = set(TechniqueTag.__args__)  # type: ignore[attr-defined]
-    for required in ("Tea", "Coffee", "Wine", "Brewing", "Pizza"):
+    for required in ("Tea", "Coffee", "Wine", "Brewing", "Pizza", "Spirits"):
         assert required in techs, f"missing {required!r} in technique taxonomy"
 
 

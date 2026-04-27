@@ -67,6 +67,10 @@ CuisineTag = Literal[
     "French",
     "Spanish",
     "Portuguese",
+    "British",          # UK + Ireland (combined; Irish overlaps culturally)
+    "German",
+    "Eastern European", # Russian/Ukrainian/Polish/Hungarian/Czech/etc.
+    "Scandinavian",     # Swedish/Norwegian/Danish/Finnish/Icelandic
     "Asian",            # umbrella ONLY for genuine multi-Asian fusion
     "Japanese",
     "Chinese",
@@ -82,7 +86,8 @@ CuisineTag = Literal[
     "Mediterranean",
     "Middle Eastern",
     "American",
-    "Latin American",
+    "Latin American",   # mainland: Brazilian/Argentinian/Peruvian/etc.
+    "Caribbean",        # island nations: Cuban/Jamaican/Puerto Rican/etc.
 ]
 
 # Technique / format: distinguishing methods. Generic ``Cooking`` is NOT
@@ -103,6 +108,9 @@ TechniqueTag = Literal[
     "One-Pot",
     "Cocktails",        # mixology only; not a tag for any book that
                          # mentions a bar / drinks alongside food
+    "Spirits",          # whisky/gin/rum/tequila APPRECIATION books
+                         # (tasting notes, distillery guides) — distinct
+                         # from Cocktails (mixed drinks)
     "Tea",
     "Coffee",
     "Wine",
@@ -178,13 +186,14 @@ SYSTEM_PROMPT = """You're tagging cookbooks for a personal-library discovery sys
 
 The taxonomy is closed and small — these are the only labels you may use:
 
-  CUISINE: Italian, French, Spanish, Portuguese, Asian, Japanese, Chinese,
+  CUISINE: Italian, French, Spanish, Portuguese, British, German,
+           Eastern European, Scandinavian, Asian, Japanese, Chinese,
            Korean, Vietnamese, Thai, Filipino, Indian, Hawaiian, African,
            Ethiopian, Mexican, Mediterranean, Middle Eastern, American,
-           Latin American
+           Latin American, Caribbean
   TECHNIQUE: Baking, Pastry, Bread, Pizza, Grilling/BBQ, Slow Cooker,
-             Pressure Cooker, One-Pot, Cocktails, Tea, Coffee, Wine,
-             Brewing, Preservation, Fermentation
+             Pressure Cooker, One-Pot, Cocktails, Spirits, Tea, Coffee,
+             Wine, Brewing, Preservation, Fermentation
   DIETARY: Vegetarian, Vegan, Gluten-Free, Keto/Low-Carb, Paleo,
            Kid-Friendly
 
@@ -214,8 +223,36 @@ Cooking, J. Kenji López-Alt, BBQ books, Tex-Mex, regional US — Southern,
 New England, etc.). Use it sparingly — many "American" books are really
 generic catch-alls and should have empty cuisine instead.
 
-'Latin American' covers Brazilian, Argentinian, Peruvian, Cuban, etc. —
-NOT Mexican (that has its own label).
+'Latin American' covers Brazilian, Argentinian, Peruvian, Colombian,
+Chilean — mainland Spanish/Portuguese-speaking Latin America.
+- NOT Mexican (own label)
+- NOT Caribbean island cuisines (Cuban, Puerto Rican, Jamaican, etc. —
+  use 'Caribbean' instead, even though Cuba/PR are Spanish-speaking)
+
+'Caribbean' covers all island cuisines of the Caribbean: Cuban, Puerto
+Rican, Jamaican, Trinidadian, Haitian, Dominican, Bahamian, etc. The
+distinguishing cooking culture (jerk seasoning, rice & peas, plantains,
+ackee, callaloo) is shared across the islands and distinct from
+mainland Latin America.
+
+'British' covers UK and Ireland — English, Scottish, Welsh, Irish.
+Combined because Irish cuisine has strong UK overlap (pub food, baking
+traditions, breakfast culture). NOT for London-restaurant cookbooks
+that are really Mediterranean (Ottolenghi, River Cafe).
+
+'German' covers German cuisine (sauerbraten, schnitzel, knödel) plus
+adjacent Austrian and German-Swiss cooking — culturally Central
+European but small enough to fold into one label.
+
+'Eastern European' covers Russian, Ukrainian, Polish, Hungarian, Czech,
+Bulgarian, Romanian, etc. — broadly the Slavic + Central European
+cooking traditions east of Germany. Caucasus + Central Asia cookbooks
+(Georgian, Armenian, Uzbek) also fit here as the closest available
+label, since they're not in the taxonomy specifically.
+
+'Scandinavian' (sometimes called 'Nordic') covers Sweden, Norway,
+Denmark, Finland, Iceland — herring, gravlax, smörgåsbord, the
+modern New Nordic movement (Noma, Aquavit).
 
 Apply tags ONLY from the provided enums in the response schema. Empty lists
 are valid and preferred when no tag fits well — over-tagging is worse than
@@ -246,13 +283,22 @@ chapter → no Bread tag).
 
 Specific technique-tag rules to be strict about:
 
-- Cocktails: ONLY for mixology books — books whose identity is
-  cocktail/spirits recipes. A general cookbook from a restaurant that
-  happens to have a bar should NOT be tagged Cocktails just because
-  drinks appear in a chapter. Examples that are Cocktails: PDT
-  Cocktail Book, Death & Co, Drinking French. Examples that are NOT
-  Cocktails: SPUNTINO (Italian comfort food restaurant cookbook with
-  some drink recipes), most "bar food" cookbooks.
+- Cocktails: ONLY for mixology books — books whose identity is MIXED
+  drinks recipes. A general cookbook from a restaurant that happens
+  to have a bar should NOT be tagged Cocktails just because drinks
+  appear in a chapter. Distinguished from Spirits (below): a cocktail
+  book gives recipes for combinations; a spirits book covers tasting,
+  distilleries, and appreciation of single spirits. Examples that are
+  Cocktails: PDT Cocktail Book, Death & Co, Drinking French. NOT
+  Cocktails: SPUNTINO (Italian comfort food with bar chapter), World
+  Atlas of Whisky (that's Spirits), most "bar food" cookbooks.
+
+- Spirits: whisky/gin/rum/tequila APPRECIATION books — distillery
+  guides, tasting notes, single-spirit deep-dives. NOT mixed drinks.
+  Examples: World Atlas of Whisky, 101 Whiskies to Try Before You Die,
+  Whisky: The Manual, Drinking Distilled. A book about coffee cocktails
+  → Cocktails (and Coffee), NOT Spirits. A book about whisky cocktails
+  → Cocktails, NOT Spirits. Spirits is for non-cocktail spirits content.
 
 - Bread: dedicated bread books only (Tartine Bread, Bread Baker's
   Apprentice). Pizza books get the PIZZA tag, not Bread, even though
@@ -467,6 +513,66 @@ Examples — calibrate against these:
 
 * "Mi Cocina: Recipes and Rapture from My Kitchen in Mexico"
   → cuisine=['Mexican'], technique=[], dietary=[], confidence='high'
+
+* "Cuisines of Odesa: A Ukrainian Cookbook"
+  → cuisine=['Eastern European'], technique=[], dietary=[],
+    confidence='high'
+
+* "The Sweet Polish Kitchen: A Celebration of Home Baking"
+  → cuisine=['Eastern European'], technique=['Baking'], dietary=[],
+    confidence='high'
+
+* "Chesnok: Cooking from My Corner of the Diaspora — Eastern Europe,
+  the Caucasus, and Central Asia"
+  → cuisine=['Eastern European'], technique=[], dietary=[],
+    confidence='medium'
+  (Eastern European is the closest umbrella; Caucasus and Central Asia
+   aren't separate labels and fold here)
+
+* "The Swedish Cookbook: Lagom Flavors for the Modern Kitchen"
+  → cuisine=['Scandinavian'], technique=[], dietary=[], confidence='high'
+
+* "Aquavit: And the New Scandinavian Cuisine"
+  → cuisine=['Scandinavian'], technique=[], dietary=[], confidence='high'
+
+* "Kin: Caribbean Recipes for the Modern Kitchen"
+  → cuisine=['Caribbean'], technique=[], dietary=[], confidence='high'
+
+* "The Essential Cuban Cookbook"
+  → cuisine=['Caribbean'], technique=[], dietary=[], confidence='high'
+  (Cuban → Caribbean, NOT Latin American — even though Cuba is
+   Spanish-speaking, its cooking culture is Caribbean)
+
+* "Trap Kitchen: Wah Gwaan: Jamaican Cookbook"
+  → cuisine=['Caribbean'], technique=[], dietary=[], confidence='high'
+
+* "Classic German Cooking: From Semmelknödel to Sauerbraten"
+  → cuisine=['German'], technique=[], dietary=[], confidence='high'
+
+* "The Irish Pub Cookbook"
+  → cuisine=['British'], technique=[], dietary=[], confidence='high'
+  (Irish pub food → British (umbrella for UK + Ireland), not its own tag)
+
+* "The Best of British Baking: Classic Sweet Treats and Savory Bakes"
+  → cuisine=['British'], technique=['Baking'], dietary=[],
+    confidence='high'
+
+* "The World Atlas of Whisky: 200 distilleries, 750 expressions tasted"
+  → cuisine=[], technique=['Spirits'], dietary=[], confidence='high'
+  (whisky tasting/atlas → Spirits, NOT Cocktails — no mixed drink
+   recipes; this is single-spirit appreciation)
+
+* "101 Whiskies to Try Before You Die"
+  → cuisine=[], technique=['Spirits'], dietary=[], confidence='high'
+
+* "Drinking Distilled: A User's Manual"
+  → cuisine=[], technique=['Spirits'], dietary=[], confidence='high'
+
+* "Mezcal and Tequila Cocktails: Mixed Drinks for the Golden Age of
+  Agave"
+  → cuisine=[], technique=['Cocktails'], dietary=[], confidence='high'
+  (mixed drinks made with mezcal/tequila → Cocktails, NOT Spirits, even
+   though mezcal/tequila are spirits — the book's identity is mixology)
 
 * "The Forager Chef's Book of Flora" — wild-foods cookbook
   → cuisine=[], technique=['Preservation'], dietary=[], confidence='medium'
