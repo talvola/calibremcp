@@ -51,17 +51,22 @@ SOURCE = "cookbook_llm"
 # Taxonomy — the closed set of facet labels Claude is allowed to pick from.
 # ---------------------------------------------------------------------------
 
-# Cuisine: 16 labels covering the bulk of cookbook cuisine signal.
+# Cuisine: 20 labels covering the bulk of cookbook cuisine signal.
 # Empty list is allowed for generic / multi-cuisine books — the prompt
 # explicitly tells the model not to force a tag.
 #
-# Asian breakdown (Erik's feedback): bare "Asian" is too generic — most
-# Asian cookbooks are clearly one cuisine. Reserve the umbrella label
-# for genuine multi-Asian fusion books and prefer the specific label
-# whenever possible.
+# Asian / African breakdown: bare umbrella labels are LAST RESORTS only.
+# Most Asian and African cookbooks are clearly one cuisine; reserve the
+# umbrella for multi-region fusion or for cuisines not represented by a
+# specific label (e.g. Burmese → 'Asian', Senegalese → 'African').
+#
+# Mediterranean = Greek / Italian / southern French / Levantine. Spanish
+# and Portuguese have their own labels; do NOT tag them Mediterranean.
 CuisineTag = Literal[
     "Italian",
     "French",
+    "Spanish",
+    "Portuguese",
     "Asian",            # umbrella ONLY for genuine multi-Asian fusion
     "Japanese",
     "Chinese",
@@ -71,6 +76,8 @@ CuisineTag = Literal[
     "Filipino",
     "Indian",
     "Hawaiian",
+    "African",          # umbrella ONLY for non-Ethiopian / pan-African
+    "Ethiopian",
     "Mexican",
     "Mediterranean",
     "Middle Eastern",
@@ -81,18 +88,29 @@ CuisineTag = Literal[
 # Technique / format: distinguishing methods. Generic ``Cooking`` is NOT
 # in the set — every cookbook is "cooking". Tag only when the book's
 # identity is built around the technique.
+#
+# Pizza is its own tag (not Bread) because Erik would search for "pizza
+# books" separately from "bread books" even though pizza dough is bread.
+# Tea/Coffee/Wine/Brewing are non-cocktail beverage categories.
 TechniqueTag = Literal[
     "Baking",
     "Pastry",
+    "Bread",
+    "Pizza",
     "Grilling/BBQ",
     "Slow Cooker",
     "Pressure Cooker",
-    "Bread",
-    "Cocktails",        # already a top-level genre tag in Erik's library;
-                         # repeating here lets cookbook books co-tag
+    "One-Pot",
+    "Cocktails",        # mixology only; not a tag for any book that
+                         # mentions a bar / drinks alongside food
+    "Tea",
+    "Coffee",
+    "Wine",
+    "Brewing",          # beer / cider / mead / kombucha — anything
+                         # fermented to drink (distinct from Fermentation
+                         # which covers food preservation)
     "Preservation",
     "Fermentation",
-    "One-Pot",
 ]
 
 # Dietary: only flagged when the book's clear identity is the dietary
@@ -160,11 +178,13 @@ SYSTEM_PROMPT = """You're tagging cookbooks for a personal-library discovery sys
 
 The taxonomy is closed and small — these are the only labels you may use:
 
-  CUISINE: Italian, French, Asian, Japanese, Chinese, Korean, Vietnamese,
-           Thai, Filipino, Indian, Hawaiian, Mexican, Mediterranean,
-           Middle Eastern, American, Latin American
-  TECHNIQUE: Baking, Pastry, Grilling/BBQ, Slow Cooker, Pressure Cooker,
-             Bread, Cocktails, Preservation, Fermentation, One-Pot
+  CUISINE: Italian, French, Spanish, Portuguese, Asian, Japanese, Chinese,
+           Korean, Vietnamese, Thai, Filipino, Indian, Hawaiian, African,
+           Ethiopian, Mexican, Mediterranean, Middle Eastern, American,
+           Latin American
+  TECHNIQUE: Baking, Pastry, Bread, Pizza, Grilling/BBQ, Slow Cooker,
+             Pressure Cooker, One-Pot, Cocktails, Tea, Coffee, Wine,
+             Brewing, Preservation, Fermentation
   DIETARY: Vegetarian, Vegan, Gluten-Free, Keto/Low-Carb, Paleo,
            Kid-Friendly
 
@@ -176,6 +196,18 @@ home cookbook). If the book is single-cuisine (Japanese, Chinese, Korean,
 Vietnamese, Thai, Filipino, Indian, etc.), use that specific label and
 do NOT also add 'Asian'. If the cuisine is single but not in the
 taxonomy (e.g. Burmese, Sri Lankan), then 'Asian' is the closest fit.
+
+The 'African' umbrella works the same way — last resort. Ethiopian has
+its own label and should be used for any clearly Ethiopian cookbook
+(injera, berbere, wat, doro). Use 'African' for non-Ethiopian African
+cuisines (West African, South African, pan-continent) and for North
+African (Moroccan, Tunisian) when not better represented elsewhere.
+
+'Mediterranean' specifically means Greek, Italian, southern French, or
+Levantine (Lebanese, Syrian, etc.). Spanish and Portuguese cookbooks
+get their OWN labels and should NOT be tagged Mediterranean — even
+though Spain has a Mediterranean coast, Spanish cookbooks (tapas, paella,
+pintxos) are culinarily distinct enough to deserve their own bucket.
 
 'American' covers the modern American home-cooking tradition (Joy of
 Cooking, J. Kenji López-Alt, BBQ books, Tex-Mex, regional US — Southern,
@@ -210,7 +242,51 @@ TECHNIQUE (0-3 tags): Tag distinguishing methods/formats — Baking,
 Grilling/BBQ, Pressure Cooker, etc. Do NOT tag generic "cooking" — every
 cookbook is cooking. Tag a technique only when the book's identity is
 built around it (a bread book → Bread; a general cookbook with a bread
-chapter → no Bread tag). Cocktails is included for mixology books.
+chapter → no Bread tag).
+
+Specific technique-tag rules to be strict about:
+
+- Cocktails: ONLY for mixology books — books whose identity is
+  cocktail/spirits recipes. A general cookbook from a restaurant that
+  happens to have a bar should NOT be tagged Cocktails just because
+  drinks appear in a chapter. Examples that are Cocktails: PDT
+  Cocktail Book, Death & Co, Drinking French. Examples that are NOT
+  Cocktails: SPUNTINO (Italian comfort food restaurant cookbook with
+  some drink recipes), most "bar food" cookbooks.
+
+- Bread: dedicated bread books only (Tartine Bread, Bread Baker's
+  Apprentice). Pizza books get the PIZZA tag, not Bread, even though
+  pizza dough is bread-adjacent — a user searching for bread books does
+  not want pizza books mixed in. Same for bagel books, focaccia books,
+  crackers — those are baking-adjacent but get neither Bread nor Pizza
+  unless they're really about loaves.
+
+- Pizza: dedicated pizza cookbooks (Pizza Night, The Pizza Bible,
+  Roberta's). Do NOT also tag Bread.
+
+- Tea: tea-focused cookbooks — recipes built AROUND tea as ingredient,
+  tea education, tea + food pairing (Bird & Blend's Brew Bake Sip,
+  The Tea Cyclopedia, A Sip in Time). NOT for general cookbooks that
+  mention tea peripherally.
+
+- Coffee: coffee-focused cookbooks — brewing, espresso technique,
+  cooking with coffee (The Home Barista, Irresistible Coffee Recipes).
+  A book primarily about coffee cocktails (Coffee Cocktails) gets BOTH
+  Coffee AND Cocktails.
+
+- Wine: wine appreciation, wine + food pairing, wine-focused cookbooks
+  (Wine Food, What to Drink with What You Eat). NOT for cookbooks that
+  merely include wine pairings as side notes.
+
+- Brewing: beer, cider, mead, kombucha, hard kombucha — anything
+  fermented to be drunk. Brooklyn Brew Shop, American Cider, mead
+  guides. Distinct from Fermentation (which is for fermented FOODS:
+  kimchi, miso, sauerkraut, lacto-pickles).
+
+- Preservation: pickling, canning, jam-making, smoking, drying — food
+  preservation as the book's identity. Not the same as Fermentation
+  (though they overlap; The Noma Guide to Fermentation gets BOTH
+  Preservation and Fermentation since it's about both).
 
 DIETARY (0-2 tags): Only flag when the book's clear identity IS the
 dietary focus. A vegan cookbook → Vegan. A general cookbook with vegan
@@ -253,6 +329,31 @@ Examples — calibrate against these:
 * "I Am a Filipino: And This Is How We Cook"
   → cuisine=['Filipino'], technique=[], dietary=[], confidence='high'
 
+* "Barrafina: A Spanish Cookbook"
+  → cuisine=['Spanish'], technique=[], dietary=[], confidence='high'
+  (Spanish, NOT Mediterranean — Spain has its own label)
+
+* "Little Portugal: Bold and Flavorful Portuguese Cooking"
+  → cuisine=['Portuguese'], technique=[], dietary=[], confidence='high'
+
+* "The Book of Pintxos: Discover the Legendary Small Bites of Basque
+  Country"
+  → cuisine=['Spanish'], technique=[], dietary=[], confidence='high'
+  (Basque is part of Spain culinarily — use 'Spanish')
+
+* "Ethiopian Cookbook: Authentic Recipes from Ethiopia"
+  → cuisine=['Ethiopian'], technique=[], dietary=[], confidence='high'
+
+* "Gursha: Timeless Recipes from Ethiopia, Israel, Harlem, and Beyond"
+  → cuisine=['Ethiopian', 'Middle Eastern'], technique=[], dietary=[],
+    confidence='medium'
+  (Ethiopian Jewish cookbook — both heritages are central to the book's
+   identity, so tag both)
+
+* "Simply West African: Easy, Joyful Recipes for Every Kitchen"
+  → cuisine=['African'], technique=[], dietary=[], confidence='high'
+  (West African isn't a separate label; 'African' is the umbrella)
+
 * "The Mexican Home Kitchen"
   → cuisine=['Mexican'], technique=[], dietary=[], confidence='high'
 
@@ -262,6 +363,7 @@ Examples — calibrate against these:
 
 * "The Mediterranean Diet for Beginners"
   → cuisine=['Mediterranean'], technique=[], dietary=[], confidence='high'
+  (Mediterranean as an identity is Greek/Italian/Levantine, not Iberian)
 
 * "Maangchi's Real Korean Cooking"
   → cuisine=['Korean'], technique=[], dietary=[], confidence='high'
@@ -272,6 +374,46 @@ Examples — calibrate against these:
 
 * "Tartine Bread" by Chad Robertson — a bread-focused book
   → cuisine=[], technique=['Baking', 'Bread'], dietary=[], confidence='high'
+
+* "Pizza Night: Deliciously Doable Recipes for Pizza and Salad"
+  → cuisine=[], technique=['Pizza'], dietary=[], confidence='high'
+  (Pizza-only, NOT Bread — even though pizza dough is bread, a pizza
+   book and a bread book serve different searches)
+
+* "The Pizza Bible" by Tony Gemignani
+  → cuisine=['Italian'], technique=['Pizza'], dietary=[], confidence='high'
+
+* "Bird & Blend's Brew, Bake, Sip & Savour: 60 recipes to make with tea"
+  → cuisine=[], technique=['Tea', 'Baking'], dietary=[], confidence='high'
+  (tea-centric cookbook with baked goods using tea — Tea, NOT Cocktails;
+   Baking is appropriate since the recipes are baking-with-tea)
+
+* "The Tea Cyclopedia: A Celebration of the World's Favorite Drink"
+  → cuisine=[], technique=['Tea'], dietary=[], confidence='high'
+
+* "The Home Barista: From bean to blend, how to make the best coffee"
+  → cuisine=[], technique=['Coffee'], dietary=[], confidence='high'
+
+* "The Art & Craft of Coffee Cocktails"
+  → cuisine=[], technique=['Coffee', 'Cocktails'], dietary=[],
+    confidence='high'
+  (a book that's specifically coffee-based cocktails gets BOTH tags)
+
+* "Wine Food: New Adventures in Drinking and Cooking"
+  → cuisine=[], technique=['Wine'], dietary=[], confidence='high'
+  (wine + food pairing as the book's identity)
+
+* "Brooklyn Brew Shop's Beer Making Book"
+  → cuisine=[], technique=['Brewing'], dietary=[], confidence='high'
+
+* "American Cider: A Modern Guide to a Historic Beverage"
+  → cuisine=['American'], technique=['Brewing'], dietary=[],
+    confidence='high'
+
+* "SPUNTINO: Comfort Food (Mostly Italian) at the Bar"
+  → cuisine=['Italian'], technique=[], dietary=[], confidence='high'
+  (Italian comfort-food restaurant cookbook — NOT Cocktails just because
+   the restaurant has a bar; Cocktails is for mixology-as-identity)
 
 * "Franklin Barbecue: A Meat-Smoking Manifesto"
   → cuisine=['American'], technique=['Grilling/BBQ'], dietary=[],

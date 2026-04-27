@@ -29,11 +29,29 @@ from calibre_mcp.cleanup.cookbook_tagger import (
 
 def test_taxonomy_sizes() -> None:
     """If we add or remove labels, this test breaks deliberately so we
-    notice. Erik's guidance + strategy memo target ~30 facets; current
-    is 16+10+6 = 32."""
-    assert len(CuisineTag.__args__) == 16  # type: ignore[attr-defined]
-    assert len(TechniqueTag.__args__) == 10  # type: ignore[attr-defined]
+    notice. Current taxonomy: 20+15+6 = 41 facets (taxonomy v2 — added
+    Spanish, Portuguese, African, Ethiopian to cuisine; Pizza, Tea,
+    Coffee, Wine, Brewing to technique)."""
+    assert len(CuisineTag.__args__) == 20  # type: ignore[attr-defined]
+    assert len(TechniqueTag.__args__) == 15  # type: ignore[attr-defined]
     assert len(DietaryTag.__args__) == 6  # type: ignore[attr-defined]
+
+
+def test_iberian_and_african_cuisines_present() -> None:
+    """Erik's taxonomy-v2 fix: Spain/Portugal aren't Mediterranean, and
+    Ethiopia isn't 'just African' — both deserve their own labels.
+    Plus the African umbrella for non-Ethiopian African cuisines."""
+    cuisines = set(CuisineTag.__args__)  # type: ignore[attr-defined]
+    for required in ("Spanish", "Portuguese", "African", "Ethiopian"):
+        assert required in cuisines, f"missing {required!r} in cuisine taxonomy"
+
+
+def test_beverage_and_pizza_techniques_present() -> None:
+    """Beverage breakdown beyond Cocktails (Tea, Coffee, Wine, Brewing)
+    plus Pizza split out from Bread — taxonomy v2."""
+    techs = set(TechniqueTag.__args__)  # type: ignore[attr-defined]
+    for required in ("Tea", "Coffee", "Wine", "Brewing", "Pizza"):
+        assert required in techs, f"missing {required!r} in technique taxonomy"
 
 
 def test_specific_asian_cuisines_present() -> None:

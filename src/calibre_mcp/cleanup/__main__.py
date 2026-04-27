@@ -218,6 +218,16 @@ def _build_parser() -> argparse.ArgumentParser:
         "--retag", action="store_true",
         help="Re-tag books that already have cookbook_llm proposals (default: skip)",
     )
+    cb.add_argument(
+        "--retag-tag",
+        action="append", dest="retag_tags", default=None, metavar="TAG",
+        help="Re-tag every book currently carrying TAG (repeatable). The "
+             "sentinel '(no tags)' is a valid value — useful when the "
+             "taxonomy gains new labels and previously-empty books may now "
+             "match. Implies --retag for the matched books and deletes their "
+             "existing proposed/sentinel cookbook_llm rows before re-tagging "
+             "so the new proposals are clean.",
+    )
 
     cbr = msub.add_parser(
         "cookbooks-review",
@@ -565,14 +575,15 @@ def _cmd_set_status(args: argparse.Namespace, new_status: str) -> int:
 def _cmd_cookbooks(args: argparse.Namespace) -> int:
     from calibre_mcp.cleanup import cookbooks as cookbooks_mod
     console = Console()
-    scope_desc = (
-        f"book_ids={args.book_ids}" if args.book_ids
-        else f"tag={args.bucket_tag!r}"
-        + (f" limit={args.limit}" if args.limit else "")
-    )
+    if args.retag_tags:
+        scope_desc = f"retag-tags={args.retag_tags}"
+    elif args.book_ids:
+        scope_desc = f"book_ids={args.book_ids}"
+    else:
+        scope_desc = f"tag={args.bucket_tag!r}" + (f" limit={args.limit}" if args.limit else "")
     console.print(
         f"[bold]Cookbook tagger[/bold]  {scope_desc}  "
-        f"retag=[yellow]{args.retag}[/yellow]"
+        f"retag=[yellow]{args.retag or bool(args.retag_tags)}[/yellow]"
     )
     summary = cookbooks_mod.run(
         library_root=args.library,
@@ -581,6 +592,7 @@ def _cmd_cookbooks(args: argparse.Namespace) -> int:
         bucket_tag=args.bucket_tag,
         limit=args.limit,
         book_ids=args.book_ids,
+        retag_tags=args.retag_tags,
         skip_already_tagged=not args.retag,
     )
     table = Table(title="Cookbook tagger summary")

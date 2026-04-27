@@ -421,6 +421,131 @@ def test_report_by_tag_groups_and_excludes_sentinel(tmp_path: Path, fake_anthrop
     assert cookbooks._NO_TAGS_SENTINEL not in by_tag
 
 
+def test_resolve_retag_book_ids_finds_books_with_tag(tmp_path: Path, fake_anthropic) -> None:
+    """The --retag-tag flag scopes the retag to books currently carrying
+    a specific tag (real or sentinel)."""
+    canned, _ = fake_anthropic
+    canned["A"] = CookbookTags(cuisine=["Italian"], technique=["Cocktails"], dietary=[], confidence="high")
+    canned["B"] = CookbookTags(cuisine=["Italian"], technique=[], dietary=[], confidence="high")
+    canned["C"] = CookbookTags(cuisine=[], technique=[], dietary=[], confidence="medium")  # → sentinel
+
+    db = _build_calibre_db(
+        tmp_path / "lib",
+        books=[(1, "A", [], None), (2, "B", [], None), (3, "C", [], None)],
+        cookbooks_tag_books=[1, 2, 3],
+    )
+    pdb = tmp_path / "p.db"
+    cookbooks.run(library_root=tmp_path / "lib", metadata_db=db, proposals_db=pdb)
+
+    # Now resolve which books match retag-tag=Cocktails: just book 1.
+    pc = proposals.connect(pdb)
+    matched = cookbooks._resolve_retag_book_ids(pc, ["Cocktails"])
+    pc.close()
+    assert matched == [1]
+
+    # Multiple tags: union. Italian matches books 1 & 2; sentinel matches 3.
+    pc = proposals.connect(pdb)
+    matched_union = cookbooks._resolve_retag_book_ids(pc, ["Italian", "(no tags)"])
+    pc.close()
+    assert matched_union == [1, 2, 3]
+
+
+def test_clear_book_proposals_removes_proposed_and_sentinel(tmp_path: Path, fake_anthropic) -> None:
+    """_clear_book_proposals deletes status='proposed' + 'rejected' rows
+    for one book — used before --retag writes fresh proposals so we
+    don't end up with old + new tags mixed."""
+    canned, _ = fake_anthropic
+    canned["A"] = CookbookTags(cuisine=["Italian"], technique=["Cocktails"], dietary=[], confidence="high")
+    db = _build_calibre_db(
+        tmp_path / "lib", books=[(1, "A", [], None)], cookbooks_tag_books=[1],
+    )
+    pdb = tmp_path / "p.db"
+    cookbooks.run(library_root=tmp_path / "lib", metadata_db=db, proposals_db=pdb)
+
+    pc = proposals.connect(pdb)
+    n_before = pc.execute("SELECT COUNT(*) FROM proposals WHERE book_id=1").fetchone()[0]
+    deleted = cookbooks._clear_book_proposals(pc, 1)
+    n_after = pc.execute("SELECT COUNT(*) FROM proposals WHERE book_id=1").fetchone()[0]
+    pc.close()
+    assert n_before == 2  # Italian + Cocktails
+    assert deleted == 2
+    assert n_after == 0
+
+
+def test_clear_book_proposals_preserves_approved(tmp_path: Path, fake_anthropic) -> None:
+    """Approved/applied rows represent decisions Erik already made —
+    _clear_book_proposals must NOT delete them."""
+    canned, _ = fake_anthropic
+    canned["A"] = CookbookTags(cuisine=["Italian"], technique=[], dietary=[], confidence="high")
+    db = _build_calibre_db(
+        tmp_path / "lib", books=[(1, "A", [], None)], cookbooks_tag_books=[1],
+    )
+    pdb = tmp_path / "p.db"
+    cookbooks.run(library_root=tmp_path / "lib", metadata_db=db, proposals_db=pdb)
+
+    # Approve the Italian proposal.
+    pc = proposals.connect(pdb)
+    pc.execute("UPDATE proposals SET status='approved' WHERE proposed_value='Italian'")
+    deleted = cookbooks._clear_book_proposals(pc, 1)
+    remaining = pc.execute(
+        "SELECT proposed_value, status FROM proposals WHERE book_id=1"
+    ).fetchall()
+    pc.close()
+    assert deleted == 0
+    assert len(remaining) == 1
+    assert remaining[0]["status"] == "approved"
+
+
+def test_run_with_retag_tags_clears_then_reretags(tmp_path: Path, fake_anthropic) -> None:
+    """End-to-end: --retag-tag picks up old-tagged books, deletes their
+    old proposals, and re-tags with whatever the LLM returns now (could
+    be different — the whole point of the targeted retag)."""
+    canned, fake_client = fake_anthropic
+    canned["A"] = CookbookTags(cuisine=[], technique=["Cocktails"], dietary=[], confidence="high")
+    db = _build_calibre_db(
+        tmp_path / "lib", books=[(1, "A", [], None)], cookbooks_tag_books=[1],
+    )
+    pdb = tmp_path / "p.db"
+    cookbooks.run(library_root=tmp_path / "lib", metadata_db=db, proposals_db=pdb)
+
+    # Now the "LLM" changes its mind under the new prompt — Cocktails was
+    # wrong; this is actually an Italian cookbook.
+    canned["A"] = CookbookTags(cuisine=["Italian"], technique=[], dietary=[], confidence="high")
+
+    summary = cookbooks.run(
+        library_root=tmp_path / "lib", metadata_db=db, proposals_db=pdb,
+        retag_tags=["Cocktails"],
+    )
+    assert summary.tagged == 1  # the retag re-called the LLM
+
+    pc = proposals.connect(pdb)
+    rows = pc.execute(
+        "SELECT proposed_value, status FROM proposals WHERE book_id=1"
+    ).fetchall()
+    pc.close()
+    # Old Cocktails row is gone; new Italian row is present.
+    values = [r["proposed_value"] for r in rows]
+    assert values == ["Italian"]
+
+
+def test_run_with_retag_tags_skips_nonexistent_tag(tmp_path: Path, fake_anthropic) -> None:
+    """--retag-tag for a tag no book carries → zero books examined."""
+    canned, _ = fake_anthropic
+    canned["A"] = CookbookTags(cuisine=["Italian"], technique=[], dietary=[], confidence="high")
+    db = _build_calibre_db(
+        tmp_path / "lib", books=[(1, "A", [], None)], cookbooks_tag_books=[1],
+    )
+    pdb = tmp_path / "p.db"
+    cookbooks.run(library_root=tmp_path / "lib", metadata_db=db, proposals_db=pdb)
+
+    summary = cookbooks.run(
+        library_root=tmp_path / "lib", metadata_db=db, proposals_db=pdb,
+        retag_tags=["Klingon"],
+    )
+    assert summary.examined == 0
+    assert summary.tagged == 0
+
+
 def test_report_by_tag_sorts_by_book_count_desc(tmp_path: Path, fake_anthropic) -> None:
     canned, _ = fake_anthropic
     for i in range(5):

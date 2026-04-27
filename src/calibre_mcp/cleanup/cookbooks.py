@@ -23,7 +23,7 @@ from pathlib import Path
 
 import anthropic
 
-from calibre_mcp.cleanup import calibre_reader, proposals
+from calibre_mcp.cleanup import calibre_reader, cookbook_tagger, proposals
 from calibre_mcp.cleanup.cookbook_tagger import (
     CONFIDENCE_MAP,
     SOURCE,
@@ -178,6 +178,49 @@ def _emit_proposals(
 # ---------------------------------------------------------------------------
 
 
+def _resolve_retag_book_ids(
+    pc: sqlite3.Connection, retag_tags: list[str],
+) -> list[int]:
+    """Find every book that currently carries any of ``retag_tags`` as a
+    cookbook_llm proposal (status='proposed' or 'rejected' for the
+    sentinel). Used by the targeted retag flow when the taxonomy is
+    expanded — we re-process books whose old tags may no longer be
+    optimal under the new rules."""
+    if not retag_tags:
+        return []
+    placeholders = ",".join("?" * len(retag_tags))
+    rows = pc.execute(
+        f"""
+        SELECT DISTINCT book_id FROM proposals
+        WHERE source = ? AND field = 'tags.add'
+          AND proposed_value IN ({placeholders})
+          AND book_id != 0
+        ORDER BY book_id
+        """,  # noqa: S608 — placeholders is '?' chars; values bind via params
+        (cookbook_tagger.SOURCE, *retag_tags),
+    ).fetchall()
+    return [int(r["book_id"]) for r in rows]
+
+
+def _clear_book_proposals(pc: sqlite3.Connection, book_id: int) -> int:
+    """Delete every cookbook_llm proposal for one book — called before a
+    --retag run writes fresh proposals so we don't end up with a mix of
+    old and new tags for the same book.
+
+    Only deletes status='proposed' or 'rejected' (the sentinel). Leaves
+    'approved' / 'applied' rows intact since those represent decisions
+    Erik already made — destroying them would silently lose state."""
+    cur = pc.execute(
+        """
+        DELETE FROM proposals
+        WHERE source = ? AND field = 'tags.add' AND book_id = ?
+          AND status IN ('proposed', 'rejected')
+        """,
+        (cookbook_tagger.SOURCE, book_id),
+    )
+    return cur.rowcount
+
+
 def run(
     *,
     library_root: Path,
@@ -186,6 +229,7 @@ def run(
     bucket_tag: str = "Cookbooks",
     limit: int | None = None,
     book_ids: list[int] | None = None,
+    retag_tags: list[str] | None = None,
     skip_already_tagged: bool = True,
     progress_every: int = 10,
 ) -> CookbookRunSummary:
@@ -194,6 +238,13 @@ def run(
     ``skip_already_tagged`` (default True) avoids re-calling the LLM for
     books that already have cookbook_llm proposals — re-runs are cheap.
     Set False to force a re-tagging pass (e.g. after taxonomy edits).
+
+    ``retag_tags`` scopes a re-tag to books currently carrying any of the
+    given tag values (the sentinel ``(no tags)`` is also a valid value
+    here — useful when the taxonomy gains new labels and previously-
+    empty books may now match). Implies ``skip_already_tagged=False``
+    AND triggers the delete-existing-then-retag flow per book, so the
+    new proposals are clean. Pass alongside ``book_ids`` to combine.
     """
     library_root = Path(library_root).resolve()
     metadata_db = Path(metadata_db).resolve()
@@ -211,6 +262,21 @@ def run(
         dry_run=False,
     )
 
+    # Resolve --retag-tag into the union of book ids matching any tag.
+    # Combined with explicit --book-id by union; --retag implies
+    # skip_already_tagged=False so books always get re-processed.
+    if retag_tags:
+        retag_book_ids = _resolve_retag_book_ids(pc, retag_tags)
+        book_ids = (
+            retag_book_ids if book_ids is None
+            else sorted(set(book_ids) | set(retag_book_ids))
+        )
+        skip_already_tagged = False
+        log.info(
+            "retag-tags=%s expanded to %d distinct books",
+            retag_tags, len(retag_book_ids),
+        )
+
     examined = skipped = tagged_count = api_errors = emitted = 0
     t0 = time.monotonic()
 
@@ -223,6 +289,12 @@ def run(
             if skip_already_tagged and _already_tagged(pc, book.book_id):
                 skipped += 1
                 continue
+
+            # Delete existing cookbook_llm proposals before retagging so the
+            # new proposals don't sit alongside stale ones from an earlier
+            # taxonomy. Only fires when explicitly retagging.
+            if not skip_already_tagged:
+                _clear_book_proposals(pc, book.book_id)
 
             tags = tag_book(client, book)
             if tags is None:
