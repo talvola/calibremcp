@@ -68,6 +68,12 @@ def main(argv: list[str] | None = None) -> int:
         return _cmd_author_sweep(args)
     if args.cmd == "miner" and args.subcmd == "author-lookup":
         return _cmd_author_lookup(args)
+    if args.cmd == "miner" and args.subcmd == "perry-rhodan":
+        return _cmd_perry_rhodan(args)
+    if args.cmd == "miner" and args.subcmd == "star-trek":
+        return _cmd_star_trek(args)
+    if args.cmd == "miner" and args.subcmd == "star-trek-fixup":
+        return _cmd_star_trek_fixup(args)
     parser.print_help()
     return 2
 
@@ -243,6 +249,35 @@ def _build_parser() -> argparse.ArgumentParser:
         "--status", default="proposed",
         help="Proposal status to review (default: proposed)",
     )
+
+    pr = msub.add_parser(
+        "perry-rhodan",
+        help="Phase 7a: normalize Perry Rhodan titles and series indices",
+    )
+    pr.add_argument("--metadata-db", type=Path, required=True, help="Calibre metadata.db (read-only)")
+    pr.add_argument("--proposals-db", type=Path, required=True)
+    pr.add_argument("--dry-run", action="store_true", help="Parse and preview without persisting proposals")
+
+    st = msub.add_parser(
+        "star-trek",
+        help="Phase 7b-1: strip embedded sub-series prefix from Star Trek titles",
+    )
+    st.add_argument("--metadata-db", type=Path, required=True, help="Calibre metadata.db (read-only)")
+    st.add_argument("--proposals-db", type=Path, required=True)
+    st.add_argument("--dry-run", action="store_true", help="Parse and preview without persisting proposals")
+
+    stf = msub.add_parser(
+        "star-trek-fixup",
+        help="Phase 7b-2: strip in-universe year prefixes (e.g. '2298 - ') from Lost Era titles",
+    )
+    stf.add_argument("--metadata-db", type=Path, required=True, help="Calibre metadata.db (read-only)")
+    stf.add_argument("--proposals-db", type=Path, required=True)
+    stf.add_argument(
+        "--series-name",
+        default="Star Trek: The Lost Era",
+        help="Series to target (default: Star Trek: The Lost Era)",
+    )
+    stf.add_argument("--dry-run", action="store_true", help="Parse and preview without persisting proposals")
 
     al = msub.add_parser(
         "author-lookup",
@@ -817,6 +852,53 @@ def _cmd_author_sweep(args: argparse.Namespace) -> int:
     return 0
 
 
+def _cmd_perry_rhodan(args: argparse.Namespace) -> int:
+    from calibre_mcp.cleanup import perry_rhodan
+
+    console = Console()
+    console.print(
+        f"[bold]Perry Rhodan normalizer[/bold]  calibre=[cyan]{args.metadata_db}[/cyan]  "
+        f"dry_run=[yellow]{args.dry_run}[/yellow]"
+    )
+
+    summary, books = perry_rhodan.run(
+        calibre_db=args.metadata_db,
+        proposals_db=args.proposals_db,
+        dry_run=args.dry_run,
+    )
+
+    stat = Table(title="Perry Rhodan summary")
+    stat.add_column("metric")
+    stat.add_column("value", justify="right")
+    stat.add_row("titles examined", str(summary.examined))
+    stat.add_row("[dim]no match (skipped)[/dim]", str(summary.skipped_no_match))
+    stat.add_row("[dim]already proposed[/dim]", str(summary.skipped_already_proposed))
+    stat.add_row("[bold]proposals emitted[/bold]", str(summary.proposals_emitted))
+    console.print(stat)
+
+    if books:
+        detail = Table(
+            title=f"Parsed books ({'dry-run' if args.dry_run else 'saved'})",
+            show_lines=False,
+        )
+        detail.add_column("#", justify="right")
+        detail.add_column("new title", max_width=45, overflow="fold")
+        detail.add_column("index", justify="right")
+        for pb in sorted(books, key=lambda b: b.new_index):
+            num_label = f"{pb.book_number:03d}{pb.letter}"
+            detail.add_row(num_label, pb.real_title, f"{pb.new_index:.1f}")
+        console.print(detail)
+
+    if not args.dry_run and summary.proposals_emitted > 0:
+        console.print(
+            "\n[dim]Next: [bold]miner approve --field title --source perry_rhodan --yes[/bold] "
+            "and [bold]miner approve --field series_index --source perry_rhodan --yes[/bold], "
+            "then apply with [bold]scripts/apply_with_progress.py --field title[/bold] + "
+            "[bold]--field series_index[/bold] (rw mount + Calibre-Web stop required).[/dim]"
+        )
+    return 0
+
+
 def _cmd_author_lookup(args: argparse.Namespace) -> int:
     from calibre_mcp.cleanup import author_lookup
 
@@ -887,6 +969,113 @@ def _cmd_author_lookup(args: argparse.Namespace) -> int:
             "[bold]miner approve --field author.merge --source author_lookup --yes[/bold], "
             "then apply with [bold]scripts/apply_with_progress.py --source author_lookup[/bold] "
             "(rw mount + Calibre-Web stop required).[/dim]"
+        )
+    return 0
+
+
+def _cmd_star_trek(args: argparse.Namespace) -> int:
+    from calibre_mcp.cleanup import star_trek
+
+    console = Console()
+    console.print(
+        f"[bold]Star Trek normalizer[/bold]  calibre=[cyan]{args.metadata_db}[/cyan]  "
+        f"dry_run=[yellow]{args.dry_run}[/yellow]"
+    )
+
+    summary, books = star_trek.run(
+        calibre_db=args.metadata_db,
+        proposals_db=args.proposals_db,
+        dry_run=args.dry_run,
+    )
+
+    stat = Table(title="Star Trek summary")
+    stat.add_column("metric")
+    stat.add_column("value", justify="right")
+    stat.add_row("titles examined", str(summary.examined))
+    stat.add_row("[dim]no match (skipped)[/dim]", str(summary.skipped_no_match))
+    stat.add_row("[dim]already proposed[/dim]", str(summary.skipped_already_proposed))
+    stat.add_row("[bold]proposals emitted[/bold]", str(summary.proposals_emitted))
+    console.print(stat)
+
+    if books:
+        # Group by proposed_series, show count + sample titles per series
+        from collections import defaultdict
+        by_series: dict[str, list[str]] = defaultdict(list)
+        no_series_count = 0
+        for pb in sorted(books, key=lambda b: (b.proposed_series, b.proposed_index)):
+            by_series[pb.proposed_series].append(pb.proposed_title)
+            if not pb.current_series:
+                no_series_count += 1
+
+        detail = Table(
+            title=f"Parsed by sub-series ({'dry-run' if args.dry_run else 'saved'})",
+            show_lines=False,
+        )
+        detail.add_column("sub-series", max_width=45, overflow="fold")
+        detail.add_column("books", justify="right")
+        detail.add_column("sample titles", max_width=55, overflow="fold")
+        for series_name, titles in sorted(by_series.items()):
+            sample = "; ".join(titles[:3])
+            if len(titles) > 3:
+                sample += f" … (+{len(titles) - 3})"
+            detail.add_row(series_name, str(len(titles)), sample)
+        console.print(detail)
+
+        if no_series_count:
+            console.print(
+                f"\n[cyan]{no_series_count}[/cyan] books with no current Calibre series "
+                "will also get [bold]series[/bold] + [bold]series_index[/bold] proposals."
+            )
+
+    if not args.dry_run and summary.proposals_emitted > 0:
+        console.print(
+            "\n[dim]Next: [bold]miner approve --field title --source star_trek --yes[/bold], "
+            "then apply with [bold]scripts/apply_with_progress.py --source star_trek[/bold] "
+            "(rw mount + Calibre-Web stop required).[/dim]"
+        )
+    return 0
+
+
+def _cmd_star_trek_fixup(args: argparse.Namespace) -> int:
+    from calibre_mcp.cleanup import star_trek
+
+    console = Console()
+    console.print(
+        f"[bold]Star Trek year-prefix fixup[/bold]  "
+        f"series=[cyan]{args.series_name}[/cyan]  "
+        f"dry_run=[yellow]{args.dry_run}[/yellow]"
+    )
+
+    summary, books = star_trek.run_year_fixup(
+        calibre_db=args.metadata_db,
+        proposals_db=args.proposals_db,
+        series_name=args.series_name,
+        dry_run=args.dry_run,
+    )
+
+    stat = Table(title="Year-prefix fixup summary")
+    stat.add_column("metric")
+    stat.add_column("value", justify="right")
+    stat.add_row("titles examined", str(summary.examined))
+    stat.add_row("[dim]no year prefix (skipped)[/dim]", str(summary.skipped_no_match))
+    stat.add_row("[bold]proposals emitted[/bold]", str(summary.proposals_emitted))
+    console.print(stat)
+
+    if books:
+        detail = Table(
+            title=f"Year-prefix stripped ({'dry-run' if args.dry_run else 'saved'})",
+            show_lines=False,
+        )
+        detail.add_column("was", max_width=40, overflow="fold")
+        detail.add_column("→ now", max_width=40, overflow="fold")
+        for pb in books:
+            detail.add_row(pb.raw_title, pb.proposed_title)
+        console.print(detail)
+
+    if not args.dry_run and summary.proposals_emitted > 0:
+        console.print(
+            "\n[dim]Next: [bold]miner approve --field title --source star_trek_fixup --yes[/bold], "
+            "then apply with [bold]scripts/apply_with_progress.py --source star_trek_fixup[/bold].[/dim]"
         )
     return 0
 

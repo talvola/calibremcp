@@ -34,7 +34,7 @@ log = logging.getLogger(__name__)
 # Scalar-replacement fields: safe to overwrite without reading current state.
 # (ISBN is *not* in this set — although conceptually scalar, calibredb routes
 # it through the identifiers dict, which needs read-merge.)
-_APPLICABLE_SCALAR_FIELDS: frozenset[str] = frozenset({"publisher", "pubdate", "description", "series", "series_index"})
+_APPLICABLE_SCALAR_FIELDS: frozenset[str] = frozenset({"title", "publisher", "pubdate", "description", "series", "series_index"})
 
 # Identifier proposal fields route through the merged identifiers-dict path.
 # Phase 1 originally supported just 'isbn'; Phase 3a extends to any scheme
