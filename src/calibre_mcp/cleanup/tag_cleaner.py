@@ -90,6 +90,39 @@ _MULTI_SEMI_RE = re.compile(r'.+;.+;')
 
 _MAX_TAG_LEN = 60  # tags longer than this are keyword-stuffed garbage
 
+# ── Additional Pass 1 patterns ───────────────────────────────────────────────
+
+# Trailing punctuation = LCSH terminal period or stray whitespace/period
+# e.g. "Cookery; Chinese.", "Coooking .", "United States."
+# Exclude abbreviation-style strings where periods are throughout: "U.S.A.", "U.K."
+_TRAILING_PERIOD_RE = re.compile(r'[\s\.]+$')
+_ABBREV_RE = re.compile(r'^([A-Z]\.){2,}[A-Z]?\.$')  # U.S.A., U.K., etc.
+
+# LCSH single-semicolon with nationality/geographic qualifier after the semicolon
+# e.g. "Cookery; American", "Cooking; Chinese", "Detective and Mystery Stories; American"
+# The second part is always a short word/phrase — we match any "X; Y" where X and Y
+# are both short (≤ 35 chars each) so we don't catch author-style "Niven; Larry - ..."
+_LCSH_NATIONALITY_RE = re.compile(r'^[^;]{3,35};\s*[^;]{2,35}$')
+# Nationality/place adjectives that confirm the second part is an LCSH qualifier
+_NATIONALITY_WORDS = re.compile(
+    r'\b(American|English|British|Australian|Canadian|Irish|Scottish|Welsh|'
+    r'French|German|Italian|Spanish|Russian|Chinese|Japanese|Korean|Indian|'
+    r'Mexican|Jewish|African|European|Asian|Latin|Nordic|Scandinavian|'
+    r'International|General)\b',
+    re.IGNORECASE,
+)
+
+# "United States" bare or with LCSH dash/qualifier — all are subject headings
+_US_LCSH_RE = re.compile(r'^United States($|[\s\.\-])', re.IGNORECASE)
+
+# Import artifacts: word immediately followed by 3+ digits, no space
+# e.g. "cookie429", "C429", "Azizex666"
+# Requires 3+ digits to avoid matching real tech tags like "css3", "html5", "mp3"
+_IMPORT_ARTIFACT_RE = re.compile(r'^[A-Za-z]+\d{3,}$')
+
+# Garbled multi-value tags where commas became "m " — e.g. "Cookbooksm Cookingm Foodm"
+_GARBLED_M_RE = re.compile(r'\w+m\s+\w+m\s+')
+
 
 # ---------------------------------------------------------------------------
 # Pass 2: hardcoded canonical merge pairs
@@ -158,6 +191,37 @@ def scan(cal: sqlite3.Connection) -> ScanResult:
         # Multi-semicolon compound subjects (3+ parts) — always LCSH noise
         if _MULTI_SEMI_RE.match(name):
             ops.append(TagOp("delete", name, None, "LCSH multi-part subject", cnt, pass_num=1))
+            continue
+
+        # "United States - *" / "United States.*" LCSH political/geographic
+        if _US_LCSH_RE.match(name):
+            ops.append(TagOp("delete", name, None, "LCSH US geographic/political", cnt, pass_num=1))
+            continue
+
+        # Trailing-period LCSH tags  e.g. "Cookery; Chinese.", "Coooking ."
+        # Skip abbreviations like "U.S.A." where periods are structural
+        stripped = _TRAILING_PERIOD_RE.sub("", name)
+        if stripped != name and stripped and not _ABBREV_RE.match(name):
+            ops.append(TagOp("delete", name, None, "LCSH trailing-period tag", cnt, pass_num=1))
+            continue
+
+        # Garbled comma-separated strings  e.g. "Cookbooksm Cookingm Foodm Nonfiction"
+        if _GARBLED_M_RE.search(name):
+            ops.append(TagOp("delete", name, None, "garbled comma-separated tag", cnt, pass_num=1))
+            continue
+
+        # Import artifact  e.g. "cookie429"
+        if _IMPORT_ARTIFACT_RE.match(name):
+            ops.append(TagOp("delete", name, None, "import artifact (word+digits)", cnt, pass_num=1))
+            continue
+
+        # LCSH single-semicolon with nationality qualifier  e.g. "Cookery; American"
+        if (
+            ";" in name
+            and _LCSH_NATIONALITY_RE.match(name)
+            and _NATIONALITY_WORDS.search(name.split(";", 1)[1])
+        ):
+            ops.append(TagOp("delete", name, None, "LCSH nationality qualifier", cnt, pass_num=1))
             continue
 
     # ── Pass 2: canonical merges ────────────────────────────────────────────
