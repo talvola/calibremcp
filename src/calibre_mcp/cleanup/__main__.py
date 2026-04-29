@@ -27,7 +27,7 @@ from rich.console import Console
 from rich.table import Table
 
 from calibre_mcp.cleanup import apply as apply_mod
-from calibre_mcp.cleanup import miner, proposals
+from calibre_mcp.cleanup import miner, proposals, tag_cleaner
 from calibre_mcp.cleanup import refresh as refresh_mod
 
 
@@ -74,6 +74,14 @@ def main(argv: list[str] | None = None) -> int:
         return _cmd_star_trek(args)
     if args.cmd == "miner" and args.subcmd == "star-trek-fixup":
         return _cmd_star_trek_fixup(args)
+    if args.cmd == "tag-clean" and args.subcmd == "scan":
+        return _cmd_tag_clean_scan(args)
+    if args.cmd == "tag-clean" and args.subcmd == "review":
+        return _cmd_tag_clean_review(args)
+    if args.cmd == "tag-clean" and args.subcmd == "skip":
+        return _cmd_tag_clean_skip(args)
+    if args.cmd == "tag-clean" and args.subcmd == "apply":
+        return _cmd_tag_clean_apply(args)
     parser.print_help()
     return 2
 
@@ -348,6 +356,51 @@ def _build_parser() -> argparse.ArgumentParser:
         )
         ap.add_argument("--notes", default=None, help="Reviewer note stored on the row")
         ap.add_argument("--yes", "-y", action="store_true", help="Skip the count-and-confirm prompt")
+
+    # ── tag-clean ────────────────────────────────────────────────────────────
+    tc = sub.add_parser("tag-clean", help="Library-level tag cleanup (delete, merge, rename)")
+    tcsub = tc.add_subparsers(dest="subcmd", required=True)
+
+    tc_scan = tcsub.add_parser("scan", help="Analyse tags and queue a cleanup plan")
+    tc_scan.add_argument("--metadata-db", type=Path, required=True)
+    tc_scan.add_argument("--proposals-db", type=Path, required=True)
+    tc_scan.add_argument(
+        "--pass", dest="pass_num", type=int, choices=[1, 2], default=None,
+        help="Only generate ops for this pass (default: all passes)",
+    )
+    tc_scan.add_argument(
+        "--dry-run", action="store_true",
+        help="Show what would be queued without writing to proposals-db",
+    )
+
+    tc_review = tcsub.add_parser("review", help="Show pending tag ops")
+    tc_review.add_argument("--proposals-db", type=Path, required=True)
+    tc_review.add_argument(
+        "--pass", dest="pass_num", type=int, choices=[1, 2, 3], default=None,
+    )
+    tc_review.add_argument(
+        "--status", default="pending", choices=["pending", "applied", "skipped"],
+    )
+
+    tc_skip = tcsub.add_parser("skip", help="Mark a tag op as skipped (won't be applied)")
+    tc_skip.add_argument("--proposals-db", type=Path, required=True)
+    tc_skip.add_argument("source_tag", help="The source_tag value to skip")
+    tc_skip.add_argument("--notes", default="", help="Reason for skipping")
+
+    tc_apply = tcsub.add_parser(
+        "apply",
+        help="Execute pending tag ops against Calibre's DB (dry-run by default)",
+    )
+    tc_apply.add_argument("--metadata-db", type=Path, required=True)
+    tc_apply.add_argument("--proposals-db", type=Path, required=True)
+    tc_apply.add_argument(
+        "--pass", dest="pass_num", type=int, choices=[1, 2, 3], default=None,
+        help="Only apply ops from this pass (default: all pending)",
+    )
+    tc_apply.add_argument(
+        "--execute", action="store_true",
+        help="Actually modify the Calibre DB (default is dry-run)",
+    )
 
     return parser
 
@@ -1078,6 +1131,134 @@ def _cmd_star_trek_fixup(args: argparse.Namespace) -> int:
             "then apply with [bold]scripts/apply_with_progress.py --source star_trek_fixup[/bold].[/dim]"
         )
     return 0
+
+
+def _cmd_tag_clean_scan(args: argparse.Namespace) -> int:
+    console = Console()
+    cal = __import__("calibre_mcp.cleanup.calibre_reader", fromlist=["open_readonly"]).open_readonly(args.metadata_db)
+    result = tag_cleaner.scan(cal)
+    cal.close()
+
+    # Display summary
+    summary_tbl = Table(title="Tag landscape")
+    summary_tbl.add_column("metric")
+    summary_tbl.add_column("count", justify="right")
+    summary_tbl.add_row("total distinct tags", str(result.total_tags))
+    summary_tbl.add_row("singletons (cnt=1)", str(result.singleton_count))
+    summary_tbl.add_row("pass-1 deletes", str(len(result.pass1_ops)))
+    summary_tbl.add_row("pass-2 merges/renames", str(len(result.pass2_ops)))
+    console.print(summary_tbl)
+
+    # Filter by pass if requested
+    ops = result.ops
+    if args.pass_num is not None:
+        ops = [o for o in ops if o.pass_num == args.pass_num]
+
+    # Show ops table
+    ops_tbl = Table(title=f"Queued ops ({'dry-run' if args.dry_run else 'will save'})",
+                    show_lines=False)
+    ops_tbl.add_column("pass", justify="right", width=5)
+    ops_tbl.add_column("op", width=7)
+    ops_tbl.add_column("books", justify="right", width=6)
+    ops_tbl.add_column("source_tag", max_width=45, overflow="fold")
+    ops_tbl.add_column("→ target / reason", max_width=40, overflow="fold")
+    for op in ops:
+        target = op.target_tag or f"[dim]{op.reason}[/dim]"
+        ops_tbl.add_row(str(op.pass_num), op.op, str(op.books_affected),
+                        op.source_tag, target)
+    console.print(ops_tbl)
+
+    if args.dry_run:
+        console.print("[dim]Dry-run — nothing written. Remove --dry-run to save.[/dim]")
+        return 0
+
+    pc = proposals.connect(args.proposals_db)
+    pc.execute("BEGIN")
+    inserted = tag_cleaner.save_ops(pc, ops)
+    pc.close()
+    console.print(f"[green]Saved {inserted} new ops[/green] to {args.proposals_db}")
+    console.print(
+        "\n[dim]Next: review with [bold]tag-clean review[/bold], "
+        "skip unwanted entries with [bold]tag-clean skip TAG[/bold], "
+        "then [bold]tag-clean apply --execute[/bold] (requires RW mount).[/dim]"
+    )
+    return 0
+
+
+def _cmd_tag_clean_review(args: argparse.Namespace) -> int:
+    console = Console()
+    pc = proposals.connect(args.proposals_db)
+    pc.execute("BEGIN")
+    ops = tag_cleaner.load_ops(pc, status=args.status, pass_num=args.pass_num)
+    pc.close()
+
+    if not ops:
+        console.print(f"[dim]No {args.status} tag ops found.[/dim]")
+        return 0
+
+    tbl = Table(title=f"Tag ops — status={args.status}", show_lines=False)
+    tbl.add_column("pass", justify="right", width=5)
+    tbl.add_column("op", width=7)
+    tbl.add_column("books", justify="right", width=6)
+    tbl.add_column("source_tag", max_width=50, overflow="fold")
+    tbl.add_column("target / reason", max_width=40, overflow="fold")
+    for op in ops:
+        target = op.target_tag or f"[dim]{op.reason}[/dim]"
+        tbl.add_row(str(op.pass_num), op.op, str(op.books_affected),
+                    op.source_tag, target)
+    console.print(tbl)
+    console.print(f"[dim]{len(ops)} ops total[/dim]")
+    return 0
+
+
+def _cmd_tag_clean_skip(args: argparse.Namespace) -> int:
+    console = Console()
+    pc = proposals.connect(args.proposals_db)
+    pc.execute("BEGIN")
+    tag_cleaner.skip_op(pc, args.source_tag, notes=args.notes)
+    pc.close()
+    console.print(f"[yellow]Skipped:[/yellow] {args.source_tag!r}")
+    return 0
+
+
+def _cmd_tag_clean_apply(args: argparse.Namespace) -> int:
+    console = Console()
+    pc = proposals.connect(args.proposals_db)
+    pc.execute("BEGIN")
+    ops = tag_cleaner.load_ops(pc, status="pending", pass_num=args.pass_num)
+
+    if not ops:
+        console.print("[dim]No pending tag ops to apply.[/dim]")
+        pc.close()
+        return 0
+
+    console.print(f"[bold]{len(ops)} pending ops[/bold] "
+                  f"({'dry-run' if not args.execute else 'EXECUTE'})")
+
+    if args.execute:
+        cal = tag_cleaner.open_calibre_rw(args.metadata_db)
+        cal.execute("BEGIN IMMEDIATE")
+    else:
+        from calibre_mcp.cleanup.calibre_reader import open_readonly
+        cal = open_readonly(args.metadata_db)
+
+    result = tag_cleaner.apply_ops(cal, pc, ops, dry_run=not args.execute)
+    cal.close()
+    pc.close()
+
+    tbl = Table(title="Apply result")
+    tbl.add_column("metric")
+    tbl.add_column("value", justify="right")
+    tbl.add_row("[green]applied[/green]", str(result.applied))
+    tbl.add_row("[dim]skipped (not found)[/dim]", str(result.skipped))
+    tbl.add_row("[red]errors[/red]", str(len(result.errors)))
+    console.print(tbl)
+    for err in result.errors:
+        console.print(f"  [red]✗[/red] {err}")
+
+    if not args.execute:
+        console.print("\n[dim]Dry-run — add [bold]--execute[/bold] to apply for real.[/dim]")
+    return 0 if not result.errors else 1
 
 
 if __name__ == "__main__":
