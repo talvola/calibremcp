@@ -15,10 +15,14 @@ with the cookie stored on the requesting OAuth access token.
 
 from __future__ import annotations
 
+import html as _html
+import ipaddress
 import os
+import socket
 import sys
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlsplit
 
 from mcp.server.fastmcp import FastMCP
 
@@ -408,10 +412,15 @@ def calibre_set_cover_from_url(book_id: int, cover_url: str) -> str:
     """
     import httpx as _httpx
 
+    if (why := _reject_non_public_url(cover_url)) is not None:
+        return f"Refusing to fetch {cover_url}: {why}"
+
     resolved = cover_url
     try:
         with _httpx.Client(follow_redirects=True, timeout=10.0) as c:
             r = c.get(cover_url)
+            if (why := _reject_non_public_url(str(r.url))) is not None:
+                return f"Refusing cover URL that redirected to {r.url}: {why}"
             if r.status_code >= 400:
                 return f"Could not fetch {cover_url}: HTTP {r.status_code}"
             content_type = r.headers.get("content-type", "")
@@ -447,7 +456,13 @@ def calibre_set_cover_from_file(book_id: int, file_path: str) -> str:
 
     File must be one of: .jpg, .jpeg, .png, .webp.
     """
-    path = Path(file_path)
+    if _calibre_web is None:
+        # In HTTP mode "local" means the server container's filesystem, which
+        # no client should be able to read from. Use calibre_set_cover_from_url.
+        return (
+            "calibre_set_cover_from_file is only available on the local stdio server; use calibre_set_cover_from_url."
+        )
+    path = Path(file_path).expanduser().resolve()
     if not path.is_file():
         return f"File not found: {file_path}"
     ext = path.suffix.lower().lstrip(".")
@@ -480,6 +495,34 @@ def calibre_view_cover(book_id: int) -> str:
             f"this is almost certainly a placeholder; no real cover set."
         )
     return f"Book {book_id} cover: {size:,} bytes, {mime}"
+
+
+def _reject_non_public_url(url: str) -> str | None:
+    """Return a reason string if ``url`` must not be fetched server-side, else None.
+
+    The MCP server runs with host networking on the NAS, so an arbitrary URL
+    fetch could reach Portainer, Calibre-Web's admin, or anything else on the
+    LAN. Cover sources are public CDNs (OpenLibrary, archive.org, Amazon), so
+    we only allow http(s) to hosts that resolve exclusively to public
+    addresses. Checked on the caller's URL and again on the redirect target.
+    """
+    parts = urlsplit(url)
+    if parts.scheme not in {"http", "https"}:
+        return f"scheme {parts.scheme!r} not allowed"
+    host = parts.hostname
+    if not host:
+        return "no host in URL"
+    try:
+        infos = socket.getaddrinfo(
+            host, parts.port or (443 if parts.scheme == "https" else 80), proto=socket.IPPROTO_TCP
+        )
+    except socket.gaierror as e:
+        return f"cannot resolve host: {e}"
+    for info in infos:
+        ip = ipaddress.ip_address(info[4][0])
+        if not ip.is_global:
+            return f"host resolves to non-public address {ip}"
+    return None
 
 
 def _normalize_authors(authors: str) -> str:
@@ -764,7 +807,7 @@ def _setup_http_auth() -> None:
         from string import Template
 
         code_id = request.query_params.get("code_id", "")
-        html = Template(LOGIN_PAGE_TEMPLATE).safe_substitute(code_id=code_id, error="")
+        html = Template(LOGIN_PAGE_TEMPLATE).safe_substitute(code_id=_html.escape(code_id, quote=True), error="")
         return HTMLResponse(html)
 
     @mcp.custom_route("/auth/login", methods=["POST"])
@@ -780,8 +823,12 @@ def _setup_http_auth() -> None:
             redirect_url = await _oauth_provider.complete_authorization(code_id, username, password)
             return RedirectResponse(url=redirect_url, status_code=302)
         except ValueError as e:
-            error_html = f'<div class="error">{str(e)}</div>'
-            html = Template(LOGIN_PAGE_TEMPLATE).safe_substitute(code_id=code_id, error=error_html)
+            # Escape both: code_id is attacker-controllable via the URL, and the
+            # error text can echo Calibre-Web's flash message.
+            error_html = f'<div class="error">{_html.escape(str(e))}</div>'
+            html = Template(LOGIN_PAGE_TEMPLATE).safe_substitute(
+                code_id=_html.escape(code_id, quote=True), error=error_html
+            )
             return HTMLResponse(html, status_code=400)
 
 

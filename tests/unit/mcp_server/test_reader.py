@@ -150,3 +150,29 @@ def test_diff_reports_real_comment_changes() -> None:
     before = _state(comments="<p>one</p>\r\n")
     after = _state(comments="<p>two</p>\n")
     assert _diff_states(before, after) == ["  comments: '<p>one</p>\\n' → '<p>two</p>\\n'"]
+
+
+@pytest.mark.parametrize(
+    "url",
+    [
+        "http://127.0.0.1:19943/api/stacks",
+        "http://192.168.1.64:38083/admin",
+        "http://localhost/x.jpg",
+        "file:///etc/passwd",
+        "ftp://example.com/x.jpg",
+        "http:///no-host",
+    ],
+)
+def test_cover_url_guard_rejects_non_public(url: str) -> None:
+    from calibre_mcp.mcp_server.server import _reject_non_public_url
+
+    assert _reject_non_public_url(url) is not None
+
+
+def test_cover_url_guard_allows_public(monkeypatch: pytest.MonkeyPatch) -> None:
+    import socket
+
+    from calibre_mcp.mcp_server.server import _reject_non_public_url
+
+    monkeypatch.setattr(socket, "getaddrinfo", lambda *_a, **_k: [(None, None, None, None, ("104.16.0.1", 443))])
+    assert _reject_non_public_url("https://covers.openlibrary.org/b/isbn/123-L.jpg") is None
