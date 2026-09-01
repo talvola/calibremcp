@@ -1,0 +1,13 @@
+{
+  "mcpServers": {
+    "calibre": {
+      "type": "stdio",
+      "command": "uv",
+      "args": ["run", "python", "-m", "calibre_mcp.mcp_server"],
+      "env": {
+        "CALIBRE_METADATA_DB": "/home/erik/calibremcp/.cache/calibre-snapshot/metadata.db",
+        "CALIBRE_WEB_URL": "http://192.168.1.64:38083"
+      }
+    }
+  }
+}

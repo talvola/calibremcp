@@ -63,6 +63,7 @@ coverage-report-*/
 .env
 .env.local
 .env.*.local
+*-credentials.env
 
 # Calibre specific
 data/

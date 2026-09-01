@@ -35,3 +35,10 @@ extension.wasm
 manifest.json
 .pre-commit-config.yaml
 uv.lock
+.cache
+*-credentials.env
+.mcp.json
+docker-compose*.yml
+nginx-*config
+*.Dockerfile
+!mcp-server.Dockerfile

@@ -1,0 +1,30 @@
+services:
+  mcp:
+    build:
+      context: .
+      dockerfile: mcp-server.Dockerfile
+    container_name: calibre-mcp
+    restart: unless-stopped
+    # Host networking so the container inherits the NAS's working egress
+    # (cover URL fetches need to reach openlibrary/archive.org). The default
+    # docker bridge on this NAS has no working MASQUERADE for public IPs.
+    # No ports: needed — the container binds directly to host:8101.
+    network_mode: host
+    volumes:
+      # Read-only mount of the whole Calibre library directory. We need
+      # metadata.db AND its companions (metadata.db-wal, metadata.db-shm) so
+      # we can read fresh writes via the WAL — mounting only metadata.db
+      # would leave the reader blind to Calibre-Web's in-flight writes.
+      # The MCP server never writes to this path — writes go through
+      # Calibre-Web's HTTP API so Calibre-Web stays the single writer.
+      - /volume1/Calibre/books:/library:ro
+    environment:
+      - CALIBRE_METADATA_DB=/library/metadata.db
+      # LAN address, not the duckdns hostname: the router doesn't hairpin,
+      # so a container on the NAS can't reach its own public URL (times out).
+      - CALIBRE_WEB_URL=http://192.168.1.64:38083
+      # The public hostname this MCP server is reachable at. Must match what
+      # nginx routes to this container.
+      # Shared hostname with Calibre-Web; NPM path-routes OAuth/MCP paths
+      # to this container while leaving everything else on Calibre-Web.
+      - MCP_ISSUER_URL=https://erikbooks.duckdns.org
