@@ -24,7 +24,7 @@ from fastapi import FastAPI, Form, HTTPException, Query, Request
 from fastapi.responses import FileResponse, HTMLResponse, RedirectResponse
 from jinja2 import BaseLoader, Environment, select_autoescape
 
-from calibre_mcp.cleanup import cookbook_tagger, proposals
+from calibre_mcp.cleanup import cookbook_tagger, fantasy_tagger, mystery_tagger, scifi_tagger, proposals
 
 # ---------------------------------------------------------------------------
 # Templates
@@ -99,6 +99,9 @@ _NAV = """
   <a href="/" class="{{ 'active' if route == 'dashboard' else '' }}">Dashboard</a>
   <a href="/proposals" class="{{ 'active' if route == 'list' else '' }}">Proposals</a>
   <a href="/cookbooks" class="{{ 'active' if route == 'cookbooks' else '' }}">Cookbooks</a>
+  <a href="/mystery" class="{{ 'active' if route == 'mystery' else '' }}">Mystery</a>
+  <a href="/scifi" class="{{ 'active' if route == 'scifi' else '' }}">Sci-Fi</a>
+  <a href="/fantasy" class="{{ 'active' if route == 'fantasy' else '' }}">Fantasy</a>
   {% if current_filter %}<span class="dim">({{ current_filter }})</span>{% endif %}
 </nav>
 <hr>
@@ -359,10 +362,250 @@ TEMPLATE_COOKBOOKS = (
 """
 )
 
+TEMPLATE_MYSTERY = (
+    "<!doctype html><html><head><title>Mystery — Calibre Cleanup</title>"
+    + _STYLE
+    + "</head><body>"
+    + _NAV
+    + """
+<h1>Mystery proposals by tag <span class="dim">(status={{ status }})</span></h1>
+
+<form class="filters" method="get" action="/mystery">
+  <label>status
+    <select name="status">
+      {% for s in ['proposed', 'approved', 'rejected', 'applied'] %}
+      <option value="{{ s }}" {% if s == status %}selected{% endif %}>{{ s }}</option>
+      {% endfor %}
+    </select>
+  </label>
+  <button type="submit">Apply</button>
+</form>
+
+{% if no_tags_count %}
+<p class="dim">
+  <a href="/proposals?source=mystery_llm&amp;proposed_value=(no+tags)&amp;status=rejected&amp;size=500">
+    {{ no_tags_count }} books got no tags
+  </a> — the LLM found no clear subgenre.
+</p>
+{% endif %}
+
+{% if not facets %}
+<p class="dim">No mystery_llm proposals at status={{ status }} yet. Run
+<code>miner mystery</code> first.</p>
+{% endif %}
+
+{% for facet_name, groups in facets.items() %}
+{% if groups %}
+<div class="facet-section">
+<h2>{{ facet_name }} <span class="dim">({{ groups|length }} tags,
+    {{ groups|sum(attribute='n_books') }} proposals)</span></h2>
+
+{% for g in groups %}
+<div class="tag-group">
+  {% if status == 'proposed' %}
+  <form class="actions" method="post" action="/bulk">
+    <input type="hidden" name="source" value="mystery_llm">
+    <input type="hidden" name="proposed_value" value="{{ g.tag }}">
+    <input type="hidden" name="status" value="proposed">
+    <input type="hidden" name="return_to" value="{{ request_url }}">
+    <button type="submit" class="approve" name="action" value="approved">
+      Approve all {{ g.n_books }}
+    </button>
+    <button type="submit" class="reject" name="action" value="rejected">
+      Reject all
+    </button>
+  </form>
+  {% endif %}
+  <h3>
+    <a href="/proposals?source=mystery_llm&proposed_value={{ g.tag|urlencode }}&status={{ status }}">
+      {{ g.tag }}</a>
+    <span class="count">{{ g.n_books }} books</span>
+  </h3>
+  <div class="grid">
+    {% for book in g.books %}
+    <div class="card{% if book.confidence < 0.7 %} confidence-low{% endif %}">
+      {% if has_covers %}
+      <a href="/proposals?book_id={{ book.book_id }}">
+        <img src="/cover/{{ book.book_id }}.jpg" loading="lazy"
+             alt="{{ book.title }}">
+      </a>
+      {% endif %}
+      <div class="ttitle" title="{{ book.title }}">{{ book.title }}</div>
+      <div class="conf">{{ '%.1f' % book.confidence }}</div>
+    </div>
+    {% endfor %}
+  </div>
+</div>
+{% endfor %}
+</div>
+{% endif %}
+{% endfor %}
+</body></html>
+"""
+)
+
+TEMPLATE_SCIFI = (
+    "<!doctype html><html><head><title>Sci-Fi — Calibre Cleanup</title>"
+    + _STYLE
+    + "</head><body>"
+    + _NAV
+    + """
+<h1>Sci-Fi proposals by tag <span class="dim">(status={{ status }})</span></h1>
+
+<form class="filters" method="get" action="/scifi">
+  <label>status
+    <select name="status">
+      {% for s in ['proposed', 'approved', 'rejected', 'applied'] %}
+      <option value="{{ s }}" {% if s == status %}selected{% endif %}>{{ s }}</option>
+      {% endfor %}
+    </select>
+  </label>
+  <button type="submit">Apply</button>
+</form>
+
+{% if no_tags_count %}
+<p class="dim">
+  <a href="/proposals?source=scifi_llm&amp;proposed_value=(no+tags)&amp;status=rejected&amp;size=500">
+    {{ no_tags_count }} books got no tags
+  </a> — the LLM found no clear subgenre.
+</p>
+{% endif %}
+
+{% if not facets %}
+<p class="dim">No scifi_llm proposals at status={{ status }} yet. Run
+<code>miner scifi</code> first.</p>
+{% endif %}
+
+{% for facet_name, groups in facets.items() %}
+{% if groups %}
+<div class="facet-section">
+<h2>{{ facet_name }} <span class="dim">({{ groups|length }} tags,
+    {{ groups|sum(attribute='n_books') }} proposals)</span></h2>
+
+{% for g in groups %}
+<div class="tag-group">
+  {% if status == 'proposed' %}
+  <form class="actions" method="post" action="/bulk">
+    <input type="hidden" name="source" value="scifi_llm">
+    <input type="hidden" name="proposed_value" value="{{ g.tag }}">
+    <input type="hidden" name="status" value="proposed">
+    <input type="hidden" name="return_to" value="{{ request_url }}">
+    <button type="submit" class="approve" name="action" value="approved">
+      Approve all {{ g.n_books }}
+    </button>
+    <button type="submit" class="reject" name="action" value="rejected">
+      Reject all
+    </button>
+  </form>
+  {% endif %}
+  <h3>
+    <a href="/proposals?source=scifi_llm&proposed_value={{ g.tag|urlencode }}&status={{ status }}">
+      {{ g.tag }}</a>
+    <span class="count">{{ g.n_books }} books</span>
+  </h3>
+  <div class="grid">
+    {% for book in g.books %}
+    <div class="card{% if book.confidence < 0.7 %} confidence-low{% endif %}">
+      {% if has_covers %}
+      <a href="/proposals?book_id={{ book.book_id }}">
+        <img src="/cover/{{ book.book_id }}.jpg" loading="lazy"
+             alt="{{ book.title }}">
+      </a>
+      {% endif %}
+      <div class="ttitle" title="{{ book.title }}">{{ book.title }}</div>
+      <div class="conf">{{ '%.1f' % book.confidence }}</div>
+    </div>
+    {% endfor %}
+  </div>
+</div>
+{% endfor %}
+</div>
+{% endif %}
+{% endfor %}
+</body></html>
+"""
+)
+
+TEMPLATE_FANTASY = (
+    "<!doctype html><html><head><title>Fantasy — Calibre Cleanup</title>"
+    + _STYLE
+    + "</head><body>"
+    + _NAV
+    + """
+<h1>Fantasy proposals by tag <span class="dim">(status={{ status }})</span></h1>
+
+<form class="filters" method="get" action="/fantasy">
+  <label>status
+    <select name="status">
+      {% for s in ['proposed', 'approved', 'rejected', 'applied'] %}
+      <option value="{{ s }}" {% if s == status %}selected{% endif %}>{{ s }}</option>
+      {% endfor %}
+    </select>
+  </label>
+  <button type="submit">Apply</button>
+</form>
+
+{% if no_tags_count %}
+<p class="dim">
+  <a href="/proposals?source=fantasy_llm&amp;proposed_value=(no+tags)&amp;status=rejected&amp;size=500">
+    {{ no_tags_count }} books got no tags
+  </a> — the LLM found no clear subgenre.
+</p>
+{% endif %}
+
+{% if not groups %}
+<p class="dim">No fantasy_llm proposals at status={{ status }} yet. Run
+<code>miner fantasy</code> first.</p>
+{% endif %}
+
+{% for g in groups %}
+<div class="tag-group">
+  {% if status == 'proposed' %}
+  <form class="actions" method="post" action="/bulk">
+    <input type="hidden" name="source" value="fantasy_llm">
+    <input type="hidden" name="proposed_value" value="{{ g.tag }}">
+    <input type="hidden" name="status" value="proposed">
+    <input type="hidden" name="return_to" value="{{ request_url }}">
+    <button type="submit" class="approve" name="action" value="approved">
+      Approve all {{ g.n_books }}
+    </button>
+    <button type="submit" class="reject" name="action" value="rejected">
+      Reject all
+    </button>
+  </form>
+  {% endif %}
+  <h3>
+    <a href="/proposals?source=fantasy_llm&proposed_value={{ g.tag|urlencode }}&status={{ status }}">
+      {{ g.tag }}</a>
+    <span class="count">{{ g.n_books }} books</span>
+  </h3>
+  <div class="grid">
+    {% for book in g.books %}
+    <div class="card{% if book.confidence < 0.7 %} confidence-low{% endif %}">
+      {% if has_covers %}
+      <a href="/proposals?book_id={{ book.book_id }}">
+        <img src="/cover/{{ book.book_id }}.jpg" loading="lazy"
+             alt="{{ book.title }}">
+      </a>
+      {% endif %}
+      <div class="ttitle" title="{{ book.title }}">{{ book.title }}</div>
+      <div class="conf">{{ '%.1f' % book.confidence }}</div>
+    </div>
+    {% endfor %}
+  </div>
+</div>
+{% endfor %}
+</body></html>
+"""
+)
+
 _JINJA = Environment(loader=BaseLoader(), autoescape=select_autoescape(["html"]))
 _DASHBOARD_TMPL = _JINJA.from_string(TEMPLATE_DASHBOARD)
 _LIST_TMPL = _JINJA.from_string(TEMPLATE_LIST)
 _COOKBOOKS_TMPL = _JINJA.from_string(TEMPLATE_COOKBOOKS)
+_MYSTERY_TMPL = _JINJA.from_string(TEMPLATE_MYSTERY)
+_SCIFI_TMPL = _JINJA.from_string(TEMPLATE_SCIFI)
+_FANTASY_TMPL = _JINJA.from_string(TEMPLATE_FANTASY)
 
 
 # ---------------------------------------------------------------------------
@@ -656,6 +899,189 @@ def create_app(
             route="cookbooks",
             status=status,
             facets=facets,
+            no_tags_count=no_tags_count,
+            has_covers=book_paths is not None,
+            request_url=str(request.url),
+            current_filter=f"status={status}",
+        )
+
+    @app.get("/mystery", response_class=HTMLResponse)
+    def mystery_view(request: Request, status: str = Query("proposed")) -> str:
+        """Per-tag dashboard for mystery_llm proposals. Groups by Subgenre and Character."""
+        with _conn() as conn:
+            rows = conn.execute(
+                """
+                SELECT proposed_value AS tag, book_id, confidence
+                FROM proposals
+                WHERE source = 'mystery_llm' AND field = 'tags.add'
+                  AND status = ? AND proposed_value != '(no tags)'
+                ORDER BY proposed_value, confidence DESC
+                """,
+                (status,),
+            ).fetchall()
+            no_tags_count = conn.execute(
+                """
+                SELECT COUNT(*) FROM proposals
+                WHERE source = 'mystery_llm' AND field = 'tags.add'
+                  AND proposed_value = '(no tags)'
+                """,
+            ).fetchone()[0]
+
+        subgenres = set(mystery_tagger.SubgenreTag.__args__)  # type: ignore[attr-defined]
+        characters = set(mystery_tagger.CharacterTag.__args__)  # type: ignore[attr-defined]
+
+        per_tag: dict[str, list[tuple[int, float]]] = {}
+        for r in rows:
+            per_tag.setdefault(r["tag"], []).append((r["book_id"], r["confidence"]))
+
+        all_book_ids = {bid for items in per_tag.values() for bid, _ in items}
+        ctx_map = loader.get(all_book_ids)
+
+        def _build_groups(tag_set: set[str]) -> list[dict]:
+            out = []
+            for tag, items in per_tag.items():
+                if tag not in tag_set:
+                    continue
+                items_sorted = sorted(items, key=lambda x: -x[1])
+                books = [
+                    {
+                        "book_id": bid,
+                        "title": ctx_map[bid].title if bid in ctx_map else f"#{bid}",
+                        "confidence": conf,
+                    }
+                    for bid, conf in items_sorted
+                ]
+                out.append({"tag": tag, "n_books": len(books), "books": books})
+            out.sort(key=lambda g: -g["n_books"])
+            return out
+
+        facets = {
+            "Subgenre": _build_groups(subgenres),
+            "Character": _build_groups(characters),
+        }
+
+        return _MYSTERY_TMPL.render(
+            route="mystery",
+            status=status,
+            facets=facets,
+            no_tags_count=no_tags_count,
+            has_covers=book_paths is not None,
+            request_url=str(request.url),
+            current_filter=f"status={status}",
+        )
+
+    @app.get("/scifi", response_class=HTMLResponse)
+    def scifi_view(request: Request, status: str = Query("proposed")) -> str:
+        """Per-tag dashboard for scifi_llm proposals. Groups by Subgenre and Theme."""
+        with _conn() as conn:
+            rows = conn.execute(
+                """
+                SELECT proposed_value AS tag, book_id, confidence
+                FROM proposals
+                WHERE source = 'scifi_llm' AND field = 'tags.add'
+                  AND status = ? AND proposed_value != '(no tags)'
+                ORDER BY proposed_value, confidence DESC
+                """,
+                (status,),
+            ).fetchall()
+            no_tags_count = conn.execute(
+                """
+                SELECT COUNT(*) FROM proposals
+                WHERE source = 'scifi_llm' AND field = 'tags.add'
+                  AND proposed_value = '(no tags)'
+                """,
+            ).fetchone()[0]
+
+        subgenres = set(scifi_tagger.SubgenreTag.__args__)  # type: ignore[attr-defined]
+        themes = set(scifi_tagger.ThemeTag.__args__)        # type: ignore[attr-defined]
+
+        per_tag: dict[str, list[tuple[int, float]]] = {}
+        for r in rows:
+            per_tag.setdefault(r["tag"], []).append((r["book_id"], r["confidence"]))
+
+        all_book_ids = {bid for items in per_tag.values() for bid, _ in items}
+        ctx_map = loader.get(all_book_ids)
+
+        def _build_groups(tag_set: set[str]) -> list[dict]:
+            out = []
+            for tag, items in per_tag.items():
+                if tag not in tag_set:
+                    continue
+                items_sorted = sorted(items, key=lambda x: -x[1])
+                books = [
+                    {
+                        "book_id": bid,
+                        "title": ctx_map[bid].title if bid in ctx_map else f"#{bid}",
+                        "confidence": conf,
+                    }
+                    for bid, conf in items_sorted
+                ]
+                out.append({"tag": tag, "n_books": len(books), "books": books})
+            out.sort(key=lambda g: -g["n_books"])
+            return out
+
+        facets = {
+            "Subgenre": _build_groups(subgenres),
+            "Theme": _build_groups(themes),
+        }
+
+        return _SCIFI_TMPL.render(
+            route="scifi",
+            status=status,
+            facets=facets,
+            no_tags_count=no_tags_count,
+            has_covers=book_paths is not None,
+            request_url=str(request.url),
+            current_filter=f"status={status}",
+        )
+
+    @app.get("/fantasy", response_class=HTMLResponse)
+    def fantasy_view(request: Request, status: str = Query("proposed")) -> str:
+        """Per-tag dashboard for fantasy_llm proposals."""
+        with _conn() as conn:
+            rows = conn.execute(
+                """
+                SELECT proposed_value AS tag, book_id, confidence
+                FROM proposals
+                WHERE source = 'fantasy_llm' AND field = 'tags.add'
+                  AND status = ? AND proposed_value != '(no tags)'
+                ORDER BY proposed_value, confidence DESC
+                """,
+                (status,),
+            ).fetchall()
+            no_tags_count = conn.execute(
+                """
+                SELECT COUNT(*) FROM proposals
+                WHERE source = 'fantasy_llm' AND field = 'tags.add'
+                  AND proposed_value = '(no tags)'
+                """,
+            ).fetchone()[0]
+
+        per_tag: dict[str, list[tuple[int, float]]] = {}
+        for r in rows:
+            per_tag.setdefault(r["tag"], []).append((r["book_id"], r["confidence"]))
+
+        all_book_ids = {bid for items in per_tag.values() for bid, _ in items}
+        ctx_map = loader.get(all_book_ids)
+
+        groups = []
+        for tag, items in per_tag.items():
+            items_sorted = sorted(items, key=lambda x: -x[1])
+            books = [
+                {
+                    "book_id": bid,
+                    "title": ctx_map[bid].title if bid in ctx_map else f"#{bid}",
+                    "confidence": conf,
+                }
+                for bid, conf in items_sorted
+            ]
+            groups.append({"tag": tag, "n_books": len(books), "books": books})
+        groups.sort(key=lambda g: -g["n_books"])
+
+        return _FANTASY_TMPL.render(
+            route="fantasy",
+            status=status,
+            groups=groups,
             no_tags_count=no_tags_count,
             has_covers=book_paths is not None,
             request_url=str(request.url),

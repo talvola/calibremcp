@@ -39,6 +39,9 @@ def main(argv: list[str] | None = None) -> int:
         level=args.log_level,
         format="%(asctime)s %(levelname)-5s %(name)s  %(message)s",
     )
+    # `calibre_mcp/__init__.py` calls basicConfig(DEBUG) at import time, which
+    # makes ours a no-op. Force the root level so --log-level actually takes.
+    logging.getLogger().setLevel(args.log_level)
 
     if args.cmd == "miner" and args.subcmd == "run":
         return _cmd_run(args)
@@ -64,6 +67,18 @@ def main(argv: list[str] | None = None) -> int:
         return _cmd_cookbooks(args)
     if args.cmd == "miner" and args.subcmd == "cookbooks-review":
         return _cmd_cookbooks_review(args)
+    if args.cmd == "miner" and args.subcmd == "mystery":
+        return _cmd_mystery(args)
+    if args.cmd == "miner" and args.subcmd == "mystery-review":
+        return _cmd_mystery_review(args)
+    if args.cmd == "miner" and args.subcmd == "scifi":
+        return _cmd_scifi(args)
+    if args.cmd == "miner" and args.subcmd == "scifi-review":
+        return _cmd_scifi_review(args)
+    if args.cmd == "miner" and args.subcmd == "fantasy":
+        return _cmd_fantasy(args)
+    if args.cmd == "miner" and args.subcmd == "fantasy-review":
+        return _cmd_fantasy_review(args)
     if args.cmd == "miner" and args.subcmd == "author-sweep":
         return _cmd_author_sweep(args)
     if args.cmd == "miner" and args.subcmd == "author-lookup":
@@ -74,6 +89,8 @@ def main(argv: list[str] | None = None) -> int:
         return _cmd_star_trek(args)
     if args.cmd == "miner" and args.subcmd == "star-trek-fixup":
         return _cmd_star_trek_fixup(args)
+    if args.cmd == "miner" and args.subcmd == "audit-book":
+        return _cmd_audit_book(args)
     if args.cmd == "tag-clean" and args.subcmd == "scan":
         return _cmd_tag_clean_scan(args)
     if args.cmd == "tag-clean" and args.subcmd == "review":
@@ -82,6 +99,8 @@ def main(argv: list[str] | None = None) -> int:
         return _cmd_tag_clean_skip(args)
     if args.cmd == "tag-clean" and args.subcmd == "apply":
         return _cmd_tag_clean_apply(args)
+    if args.cmd == "tag-clean" and args.subcmd == "audit":
+        return _cmd_tag_clean_audit(args)
     parser.print_help()
     return 2
 
@@ -258,6 +277,108 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Proposal status to review (default: proposed)",
     )
 
+    mys = msub.add_parser(
+        "mystery",
+        help="LLM-tag the Mystery bucket with subgenre / character facets",
+    )
+    mys.add_argument("--metadata-db", type=Path, required=True)
+    mys.add_argument("--proposals-db", type=Path, required=True)
+    mys.add_argument(
+        "--bucket-tag", default="Mystery",
+        help="Tag identifying the bucket (default: Mystery)",
+    )
+    mys.add_argument("--limit", type=int, default=None)
+    mys.add_argument(
+        "--book-id", type=int, action="append", dest="book_ids", default=None,
+        help="Restrict to specific book IDs (repeat for multiple)",
+    )
+    mys.add_argument(
+        "--retag", action="store_true",
+        help="Re-tag books that already have mystery_llm proposals",
+    )
+    mys.add_argument(
+        "--retag-tag",
+        action="append", dest="retag_tags", default=None, metavar="TAG",
+        help="Re-tag every book currently carrying TAG as a mystery_llm proposal "
+             "(repeatable). Implies --retag for matched books.",
+    )
+
+    mysr = msub.add_parser(
+        "mystery-review",
+        help="Group mystery_llm proposals by tag for review + bulk approve",
+    )
+    mysr.add_argument("--proposals-db", type=Path, required=True)
+    mysr.add_argument("--metadata-db", type=Path, required=True)
+    mysr.add_argument("--status", default="proposed")
+
+    sf = msub.add_parser(
+        "scifi",
+        help="LLM-tag the Science Fiction bucket with subgenre / theme facets",
+    )
+    sf.add_argument("--metadata-db", type=Path, required=True)
+    sf.add_argument("--proposals-db", type=Path, required=True)
+    sf.add_argument(
+        "--bucket-tag", default="Science Fiction",
+        help="Tag identifying the bucket (default: Science Fiction)",
+    )
+    sf.add_argument("--limit", type=int, default=None)
+    sf.add_argument(
+        "--book-id", type=int, action="append", dest="book_ids", default=None,
+        help="Restrict to specific book IDs (repeat for multiple)",
+    )
+    sf.add_argument(
+        "--retag", action="store_true",
+        help="Re-tag books that already have scifi_llm proposals",
+    )
+    sf.add_argument(
+        "--retag-tag",
+        action="append", dest="retag_tags", default=None, metavar="TAG",
+        help="Re-tag every book currently carrying TAG as a scifi_llm proposal "
+             "(repeatable). Implies --retag for matched books.",
+    )
+
+    sfr = msub.add_parser(
+        "scifi-review",
+        help="Group scifi_llm proposals by tag for review + bulk approve",
+    )
+    sfr.add_argument("--proposals-db", type=Path, required=True)
+    sfr.add_argument("--metadata-db", type=Path, required=True)
+    sfr.add_argument("--status", default="proposed")
+
+    fa = msub.add_parser(
+        "fantasy",
+        help="LLM-tag the Fantasy bucket with subgenre facets",
+    )
+    fa.add_argument("--metadata-db", type=Path, required=True)
+    fa.add_argument("--proposals-db", type=Path, required=True)
+    fa.add_argument(
+        "--bucket-tag", default="Fantasy",
+        help="Tag identifying the bucket (default: Fantasy)",
+    )
+    fa.add_argument("--limit", type=int, default=None)
+    fa.add_argument(
+        "--book-id", type=int, action="append", dest="book_ids", default=None,
+        help="Restrict to specific book IDs (repeat for multiple)",
+    )
+    fa.add_argument(
+        "--retag", action="store_true",
+        help="Re-tag books that already have fantasy_llm proposals",
+    )
+    fa.add_argument(
+        "--retag-tag",
+        action="append", dest="retag_tags", default=None, metavar="TAG",
+        help="Re-tag every book currently carrying TAG as a fantasy_llm proposal "
+             "(repeatable). Implies --retag for matched books.",
+    )
+
+    far = msub.add_parser(
+        "fantasy-review",
+        help="Group fantasy_llm proposals by tag for review + bulk approve",
+    )
+    far.add_argument("--proposals-db", type=Path, required=True)
+    far.add_argument("--metadata-db", type=Path, required=True)
+    far.add_argument("--status", default="proposed")
+
     pr = msub.add_parser(
         "perry-rhodan",
         help="Phase 7a: normalize Perry Rhodan titles and series indices",
@@ -357,6 +478,34 @@ def _build_parser() -> argparse.ArgumentParser:
         ap.add_argument("--notes", default=None, help="Reviewer note stored on the row")
         ap.add_argument("--yes", "-y", action="store_true", help="Skip the count-and-confirm prompt")
 
+    ab = msub.add_parser(
+        "audit-book",
+        help="Audit one book for gold-standard metadata; optionally emit proposals",
+    )
+    ab.add_argument("--metadata-db", type=Path, required=True, help="Calibre metadata.db (read-only)")
+    ab.add_argument(
+        "--proposals-db", type=Path, default=None,
+        help="Propose-queue DB (required when --propose is set)",
+    )
+    ab.add_argument("--book-id", type=int, required=True, help="Calibre book id to audit")
+    ab.add_argument(
+        "--lookup", action="store_true",
+        help="Hit OpenLibrary / Google Books / Goodreads to fill gaps (network)",
+    )
+    ab.add_argument(
+        "--fetch-cover", action="store_true",
+        help="Download cover image (if a URL was found by --lookup) to --covers-dir",
+    )
+    ab.add_argument(
+        "--covers-dir", type=Path,
+        default=Path(".cache/covers"),
+        help="Directory for downloaded cover images (default: .cache/covers/)",
+    )
+    ab.add_argument(
+        "--propose", action="store_true",
+        help="Persist resolved gaps as proposals (requires --proposals-db and --lookup)",
+    )
+
     # ── tag-clean ────────────────────────────────────────────────────────────
     tc = sub.add_parser("tag-clean", help="Library-level tag cleanup (delete, merge, rename)")
     tcsub = tc.add_subparsers(dest="subcmd", required=True)
@@ -400,6 +549,29 @@ def _build_parser() -> argparse.ArgumentParser:
     tc_apply.add_argument(
         "--execute", action="store_true",
         help="Actually modify the Calibre DB (default is dry-run)",
+    )
+
+    tc_audit = tcsub.add_parser(
+        "audit",
+        help="LLM batch-classify singleton/small tags (Phase B)",
+    )
+    tc_audit.add_argument("--metadata-db", type=Path, required=True)
+    tc_audit.add_argument("--proposals-db", type=Path, required=True)
+    tc_audit.add_argument(
+        "--max-books", type=int, default=4,
+        help="Audit tags with this many books or fewer (default 4)",
+    )
+    tc_audit.add_argument(
+        "--batch-size", type=int, default=100,
+        help="Tags per LLM call (default 100)",
+    )
+    tc_audit.add_argument(
+        "--limit", type=int, default=None,
+        help="Cap total tags audited — useful for a test run",
+    )
+    tc_audit.add_argument(
+        "--dry-run", action="store_true",
+        help="Call the LLM and log decisions but don't write ops",
     )
 
     return parser
@@ -1133,6 +1305,368 @@ def _cmd_star_trek_fixup(args: argparse.Namespace) -> int:
     return 0
 
 
+def _cmd_audit_book(args: argparse.Namespace) -> int:
+    from calibre_mcp.cleanup import book_audit
+
+    console = Console()
+    if args.propose and not args.proposals_db:
+        console.print("[red]--propose requires --proposals-db[/red]")
+        return 2
+    if args.propose and not args.lookup:
+        console.print(
+            "[red]--propose requires --lookup[/red]  "
+            "(nothing to propose until external sources have been consulted)"
+        )
+        return 2
+
+    report = book_audit.audit(
+        metadata_db=args.metadata_db,
+        book_id=args.book_id,
+        do_lookup=args.lookup,
+    )
+    if report is None:
+        console.print(f"[red]Book id {args.book_id} not found in {args.metadata_db}.[/red]")
+        return 1
+
+    if args.fetch_cover and args.lookup:
+        book_audit.download_cover(report, covers_dir=args.covers_dir)
+
+    b = report.book
+    header = f"\n[bold]#{b.id}[/bold]  [cyan]{b.title}[/cyan]  by [yellow]{b.primary_author or '(unknown)'}[/yellow]"
+    if b.publisher:
+        header += f"  ([dim]{b.publisher}[/dim])"
+    console.print(header)
+    if b.series:
+        console.print(f"  series: [green]{b.series}[/green] #{b.series_index or '?'}")
+    elif b.series_index and b.series_index != "1":
+        console.print(f"  series: [red](none)[/red] but series_index=[red]{b.series_index}[/red]")
+    console.print(
+        f"  cover: {'[green]yes[/green]' if b.has_cover else '[red]no[/red]'}  "
+        f"isbn: {b.isbn or '[red](none)[/red]'}  "
+        f"identifiers: {', '.join(sorted(b.identifiers)) or '(none)'}  "
+        f"description: {b.description_chars} chars"
+    )
+
+    if not report.gaps:
+        console.print("\n[green]No gaps — already at gold standard.[/green]")
+    else:
+        table = Table(title="Gap report", show_lines=False)
+        table.add_column("field", min_width=20, no_wrap=True)
+        table.add_column("status", no_wrap=True)
+        table.add_column("current", max_width=24, overflow="fold")
+        table.add_column("proposed", max_width=40, overflow="fold")
+        table.add_column("source", no_wrap=True)
+        table.add_column("conf", justify="right")
+        table.add_column("notes", max_width=28, overflow="fold")
+        style = {
+            "missing": "[yellow]missing[/yellow]",
+            "orphan":  "[red]orphan[/red]",
+            "junk":    "[red]junk[/red]",
+            "ok":      "[green]ok[/green]",
+        }
+        for g in report.gaps:
+            table.add_row(
+                g.field,
+                style.get(g.status, g.status),
+                g.current or "—",
+                g.proposed or "—",
+                g.source or "—",
+                f"{g.confidence:.2f}" if g.confidence else "—",
+                g.notes or "",
+            )
+        console.print(table)
+
+    if report.series_candidates:
+        sc = Table(title="Existing series in library (consult for consistency)")
+        sc.add_column("name", max_width=45, overflow="fold")
+        sc.add_column("books", justify="right")
+        sc.add_column("reason")
+        for c in report.series_candidates:
+            sc.add_row(c.name, str(c.book_count), c.reason)
+        console.print(sc)
+    elif any(g.field == "series" for g in report.gaps) and not report.goodreads_series:
+        console.print(
+            "[dim]No matching series in library for this author/publisher — "
+            "any series name you assign becomes the new canonical.[/dim]"
+        )
+
+    if report.goodreads_series:
+        gr = Table(title="Goodreads structured series options for this book")
+        gr.add_column("title", max_width=45, overflow="fold")
+        gr.add_column("position", justify="right")
+        gr.add_column("url", max_width=50, overflow="fold")
+        for s in report.goodreads_series:
+            gr.add_row(s.title, s.user_position or "—", s.web_url or "—")
+        console.print(gr)
+
+    if report.cover_url:
+        console.print(f"\n[bold]Cover URL:[/bold] {report.cover_url}")
+        if report.cover_local_path:
+            size = report.cover_local_path.stat().st_size if report.cover_local_path.exists() else 0
+            console.print(
+                f"[bold]Cover saved:[/bold] {report.cover_local_path}  "
+                f"([cyan]{size // 1024} KB[/cyan])"
+            )
+        elif args.fetch_cover:
+            console.print("[dim]Cover download did not complete — see lookup notes.[/dim]")
+        else:
+            console.print(
+                "[dim]Pass [bold]--fetch-cover[/bold] to download it locally for apply.[/dim]"
+            )
+
+    if report.lookup_notes:
+        console.print(f"\n[dim]Lookup notes: {'; '.join(report.lookup_notes)}[/dim]")
+
+    if args.propose:
+        ins, dup = book_audit.persist(
+            report, proposals_db=args.proposals_db, metadata_db=args.metadata_db
+        )
+        console.print(
+            f"\n[green]Inserted {ins} proposals[/green]"
+            + (f" ([dim]{dup} already in queue[/dim])" if dup else "")
+        )
+        console.print(
+            f"[dim]Next: [bold]miner review --proposals-db {args.proposals_db} "
+            f"--field identifier.isbn[/bold] (etc.), approve, then apply (needs rw mount).[/dim]"
+        )
+    elif args.lookup:
+        proposable = sum(
+            1 for g in report.gaps
+            if (g.field == "cover" and report.cover_local_path)
+            or (g.field != "cover"
+                and (g.proposed or (g.status == "junk" and g.field.startswith("identifier."))))
+        )
+        if proposable:
+            console.print(
+                f"\n[dim]Re-run with [bold]--propose --proposals-db PATH[/bold] "
+                f"to queue {proposable} proposals.[/dim]"
+            )
+
+    return 0
+
+
+def _cmd_mystery(args: argparse.Namespace) -> int:
+    from calibre_mcp.cleanup import mystery as mystery_mod
+    console = Console()
+    if args.retag_tags:
+        scope_desc = f"retag-tags={args.retag_tags}"
+    elif args.book_ids:
+        scope_desc = f"book_ids={args.book_ids}"
+    else:
+        scope_desc = f"tag={args.bucket_tag!r}" + (f" limit={args.limit}" if args.limit else "")
+    console.print(
+        f"[bold]Mystery tagger[/bold]  {scope_desc}  "
+        f"retag=[yellow]{args.retag or bool(args.retag_tags)}[/yellow]"
+    )
+    summary = mystery_mod.run(
+        metadata_db=args.metadata_db,
+        proposals_db=args.proposals_db,
+        bucket_tag=args.bucket_tag,
+        limit=args.limit,
+        book_ids=args.book_ids,
+        retag_tags=args.retag_tags,
+        skip_already_tagged=not args.retag,
+    )
+    table = Table(title="Mystery tagger summary")
+    table.add_column("metric")
+    table.add_column("value", justify="right")
+    table.add_row("examined", str(summary.examined))
+    table.add_row("[dim]skipped (already tagged)[/dim]", str(summary.skipped_already_tagged))
+    table.add_row("[green]tagged[/green]", str(summary.tagged))
+    table.add_row("[red]API errors[/red]", str(summary.api_errors))
+    table.add_row("proposals emitted", str(summary.proposals_emitted))
+    table.add_row("elapsed", f"{summary.elapsed_sec:.0f}s")
+    console.print(table)
+    console.print(
+        "\n[dim]Next: [bold]miner mystery-review[/bold] for per-tag grouping, "
+        "then [bold]miner approve --field tags.add --source mystery_llm ...[/bold].[/dim]"
+    )
+    return 0
+
+
+def _cmd_mystery_review(args: argparse.Namespace) -> int:
+    from calibre_mcp.cleanup import mystery as mystery_mod
+    console = Console()
+    groups = mystery_mod.report_by_tag(
+        proposals_db=args.proposals_db,
+        metadata_db=args.metadata_db,
+        status=args.status,
+    )
+    if not groups:
+        console.print(f"[dim]No mystery_llm proposals at status={args.status!r}.[/dim]")
+        return 0
+
+    console.print(f"[bold]Mystery proposals by tag[/bold] (status={args.status})")
+    table = Table()
+    table.add_column("tag")
+    table.add_column("books", justify="right")
+    table.add_column("samples", overflow="fold", max_width=70)
+    table.add_column("approve cmd", overflow="fold", max_width=80)
+    for g in groups:
+        if len(g.proposal_ids) <= 3:
+            ids_str = " ".join(f"--id {i}" for i in g.proposal_ids)
+        else:
+            ids_str = f"--source mystery_llm --proposed-value '{g.tag}'"
+        samples = "; ".join(g.sample_titles[:3])
+        if len(g.sample_titles) < g.n_books:
+            samples += f"; … ({g.n_books - len(g.sample_titles)} more)"
+        table.add_row(g.tag, str(g.n_books), samples, ids_str)
+    console.print(table)
+    console.print(
+        f"\n[dim]Total: {len(groups)} distinct tags across "
+        f"{sum(g.n_books for g in groups)} proposals.[/dim]"
+    )
+    return 0
+
+
+def _cmd_scifi(args: argparse.Namespace) -> int:
+    from calibre_mcp.cleanup import scifi as scifi_mod
+    console = Console()
+    if args.retag_tags:
+        scope_desc = f"retag-tags={args.retag_tags}"
+    elif args.book_ids:
+        scope_desc = f"book_ids={args.book_ids}"
+    else:
+        scope_desc = f"tag={args.bucket_tag!r}" + (f" limit={args.limit}" if args.limit else "")
+    console.print(
+        f"[bold]Sci-Fi tagger[/bold]  {scope_desc}  "
+        f"retag=[yellow]{args.retag or bool(args.retag_tags)}[/yellow]"
+    )
+    summary = scifi_mod.run(
+        metadata_db=args.metadata_db,
+        proposals_db=args.proposals_db,
+        bucket_tag=args.bucket_tag,
+        limit=args.limit,
+        book_ids=args.book_ids,
+        retag_tags=args.retag_tags,
+        skip_already_tagged=not args.retag,
+    )
+    table = Table(title="Sci-Fi tagger summary")
+    table.add_column("metric")
+    table.add_column("value", justify="right")
+    table.add_row("examined", str(summary.examined))
+    table.add_row("[dim]skipped (already tagged)[/dim]", str(summary.skipped_already_tagged))
+    table.add_row("[green]tagged[/green]", str(summary.tagged))
+    table.add_row("[red]API errors[/red]", str(summary.api_errors))
+    table.add_row("proposals emitted", str(summary.proposals_emitted))
+    table.add_row("elapsed", f"{summary.elapsed_sec:.0f}s")
+    console.print(table)
+    console.print(
+        "\n[dim]Next: [bold]miner scifi-review[/bold] for per-tag grouping, "
+        "then [bold]miner approve --field tags.add --source scifi_llm ...[/bold].[/dim]"
+    )
+    return 0
+
+
+def _cmd_scifi_review(args: argparse.Namespace) -> int:
+    from calibre_mcp.cleanup import scifi as scifi_mod
+    console = Console()
+    groups = scifi_mod.report_by_tag(
+        proposals_db=args.proposals_db,
+        metadata_db=args.metadata_db,
+        status=args.status,
+    )
+    if not groups:
+        console.print(f"[dim]No scifi_llm proposals at status={args.status!r}.[/dim]")
+        return 0
+
+    console.print(f"[bold]Sci-Fi proposals by tag[/bold] (status={args.status})")
+    table = Table()
+    table.add_column("tag")
+    table.add_column("books", justify="right")
+    table.add_column("samples", overflow="fold", max_width=70)
+    table.add_column("approve cmd", overflow="fold", max_width=80)
+    for g in groups:
+        if len(g.proposal_ids) <= 3:
+            ids_str = " ".join(f"--id {i}" for i in g.proposal_ids)
+        else:
+            ids_str = f"--source scifi_llm --proposed-value '{g.tag}'"
+        samples = "; ".join(g.sample_titles[:3])
+        if len(g.sample_titles) < g.n_books:
+            samples += f"; … ({g.n_books - len(g.sample_titles)} more)"
+        table.add_row(g.tag, str(g.n_books), samples, ids_str)
+    console.print(table)
+    console.print(
+        f"\n[dim]Total: {len(groups)} distinct tags across "
+        f"{sum(g.n_books for g in groups)} proposals.[/dim]"
+    )
+    return 0
+
+
+def _cmd_fantasy(args: argparse.Namespace) -> int:
+    from calibre_mcp.cleanup import fantasy as fantasy_mod
+    console = Console()
+    if args.retag_tags:
+        scope_desc = f"retag-tags={args.retag_tags}"
+    elif args.book_ids:
+        scope_desc = f"book_ids={args.book_ids}"
+    else:
+        scope_desc = f"tag={args.bucket_tag!r}" + (f" limit={args.limit}" if args.limit else "")
+    console.print(
+        f"[bold]Fantasy tagger[/bold]  {scope_desc}  "
+        f"retag=[yellow]{args.retag or bool(args.retag_tags)}[/yellow]"
+    )
+    summary = fantasy_mod.run(
+        metadata_db=args.metadata_db,
+        proposals_db=args.proposals_db,
+        bucket_tag=args.bucket_tag,
+        limit=args.limit,
+        book_ids=args.book_ids,
+        retag_tags=args.retag_tags,
+        skip_already_tagged=not args.retag,
+    )
+    table = Table(title="Fantasy tagger summary")
+    table.add_column("metric")
+    table.add_column("value", justify="right")
+    table.add_row("examined", str(summary.examined))
+    table.add_row("[dim]skipped (already tagged)[/dim]", str(summary.skipped_already_tagged))
+    table.add_row("[green]tagged[/green]", str(summary.tagged))
+    table.add_row("[red]API errors[/red]", str(summary.api_errors))
+    table.add_row("proposals emitted", str(summary.proposals_emitted))
+    table.add_row("elapsed", f"{summary.elapsed_sec:.0f}s")
+    console.print(table)
+    console.print(
+        "\n[dim]Next: [bold]miner fantasy-review[/bold] for per-tag grouping, "
+        "then [bold]miner approve --field tags.add --source fantasy_llm ...[/bold].[/dim]"
+    )
+    return 0
+
+
+def _cmd_fantasy_review(args: argparse.Namespace) -> int:
+    from calibre_mcp.cleanup import fantasy as fantasy_mod
+    console = Console()
+    groups = fantasy_mod.report_by_tag(
+        proposals_db=args.proposals_db,
+        metadata_db=args.metadata_db,
+        status=args.status,
+    )
+    if not groups:
+        console.print(f"[dim]No fantasy_llm proposals at status={args.status!r}.[/dim]")
+        return 0
+
+    console.print(f"[bold]Fantasy proposals by tag[/bold] (status={args.status})")
+    table = Table()
+    table.add_column("tag")
+    table.add_column("books", justify="right")
+    table.add_column("samples", overflow="fold", max_width=70)
+    table.add_column("approve cmd", overflow="fold", max_width=80)
+    for g in groups:
+        if len(g.proposal_ids) <= 3:
+            ids_str = " ".join(f"--id {i}" for i in g.proposal_ids)
+        else:
+            ids_str = f"--source fantasy_llm --proposed-value '{g.tag}'"
+        samples = "; ".join(g.sample_titles[:3])
+        if len(g.sample_titles) < g.n_books:
+            samples += f"; … ({g.n_books - len(g.sample_titles)} more)"
+        table.add_row(g.tag, str(g.n_books), samples, ids_str)
+    console.print(table)
+    console.print(
+        f"\n[dim]Total: {len(groups)} distinct tags across "
+        f"{sum(g.n_books for g in groups)} proposals.[/dim]"
+    )
+    return 0
+
+
 def _cmd_tag_clean_scan(args: argparse.Namespace) -> int:
     console = Console()
     cal = __import__("calibre_mcp.cleanup.calibre_reader", fromlist=["open_readonly"]).open_readonly(args.metadata_db)
@@ -1259,6 +1793,49 @@ def _cmd_tag_clean_apply(args: argparse.Namespace) -> int:
     if not args.execute:
         console.print("\n[dim]Dry-run — add [bold]--execute[/bold] to apply for real.[/dim]")
     return 0 if not result.errors else 1
+
+
+def _cmd_tag_clean_audit(args: argparse.Namespace) -> int:
+    from calibre_mcp.cleanup import tag_auditor
+    console = Console()
+    console.print(
+        f"[bold]Tag auditor[/bold]  max_books={args.max_books}  "
+        f"batch_size={args.batch_size}  "
+        f"{'[yellow]dry-run[/yellow]' if args.dry_run else '[green]live[/green]'}"
+    )
+    if args.limit:
+        console.print(f"[dim]Capped at {args.limit} tags (--limit)[/dim]")
+
+    result = tag_auditor.run(
+        calibre_db=args.metadata_db,
+        proposals_db=args.proposals_db,
+        max_books=args.max_books,
+        batch_size=args.batch_size,
+        dry_run=args.dry_run,
+        limit=args.limit,
+    )
+
+    tbl = Table(title="Audit result")
+    tbl.add_column("metric")
+    tbl.add_column("count", justify="right")
+    tbl.add_row("tags audited",    str(result.total_audited))
+    tbl.add_row("[red]DELETE[/red]",   str(result.deletes))
+    tbl.add_row("[yellow]MERGE[/yellow]",    str(result.merges))
+    tbl.add_row("[green]KEEP[/green]",     str(result.keeps))
+    tbl.add_row("ops saved",       str(result.ops_saved))
+    console.print(tbl)
+
+    if result.kept_tags:
+        console.print(f"\n[bold]KEEP decisions[/bold] ({len(result.kept_tags)} tags):")
+        for t in sorted(result.kept_tags):
+            console.print(f"  [green]✓[/green] {t}")
+
+    if not args.dry_run and result.ops_saved:
+        console.print(
+            f"\n[dim]Next: review with [bold]tag-clean review[/bold], "
+            f"then [bold]tag-clean apply --execute[/bold] (RW mount required).[/dim]"
+        )
+    return 0
 
 
 if __name__ == "__main__":

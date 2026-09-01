@@ -32,14 +32,21 @@ class BookRecord:
     isbn: str | None  # from identifiers where type='isbn'
     identifiers: dict[str, str]  # full map: scheme -> value
     language: str | None  # first lang_code
+    # Added 2026-09-01 for the MCP read path. Defaults keep older call sites working.
+    author_sort: str | None = None  # books.author_sort — governs Calibre-Web's author display order
+    tags: tuple[str, ...] = ()  # stored-case tag names, ordered by name (what Calibre-Web shows)
 
 
 def open_readonly(metadata_db: Path) -> sqlite3.Connection:
     """Open Calibre's metadata.db in read-only mode via URI.
 
-    Using ``mode=ro`` guarantees no accidental writes even if a caller forgets
-    to wrap statements in BEGIN/COMMIT."""
-    uri = f"file:{Path(metadata_db).resolve()}?mode=ro"
+    Why: ``mode=ro`` guarantees no accidental writes even if a caller forgets
+    to wrap statements in BEGIN/COMMIT. Why: ``immutable=1`` skips SQLite's
+    WAL/SHM probe and shared-lock acquisition — both of which are unreliable
+    over CIFS and produce intermittent "unable to open database file" errors.
+    Safe here because the canonical workflow keeps the library mounted ro and
+    stops Calibre-Web before any apply pass."""
+    uri = f"file:{Path(metadata_db).resolve()}?mode=ro&immutable=1"
     conn = sqlite3.connect(uri, uri=True)
     conn.row_factory = sqlite3.Row
     return conn
@@ -76,7 +83,7 @@ def iter_books(conn: sqlite3.Connection, *, limit: int | None = None) -> Iterato
         book_id = int(row["id"])
         authors = _authors_for(conn, book_id)
         identifiers = _identifiers_for(conn, book_id)
-        tags_ci = _tags_for(conn, book_id)
+        tag_names = _tag_names_for(conn, book_id)
         language = _language_for(conn, book_id)
         yield BookRecord(
             id=book_id,
@@ -89,10 +96,11 @@ def iter_books(conn: sqlite3.Connection, *, limit: int | None = None) -> Iterato
             description=_strip_or_none(row["comments_text"]),
             series=_strip_or_none(row["series_name"]),
             series_index=_format_series_index(row["series_index"]),
-            tags_ci=tags_ci,
+            tags_ci=frozenset(t.casefold() for t in tag_names),
             isbn=identifiers.get("isbn"),
             identifiers=identifiers,
             language=language,
+            tags=tag_names,  # author_sort left None: only the MCP read path needs it
         )
 
 
@@ -109,30 +117,57 @@ def _authors_for(conn: sqlite3.Connection, book_id: int) -> tuple[str, ...]:
     return tuple(r["name"] for r in rows if r["name"])
 
 
-def _identifiers_for(conn: sqlite3.Connection, book_id: int) -> dict[str, str]:
+def _identifiers_raw_for(conn: sqlite3.Connection, book_id: int) -> dict[str, str]:
+    """Identifiers exactly as stored (type case preserved), in row order.
+
+    Calibre desktop lowercases identifier types, but Calibre-Web stores
+    whatever case the import/edit supplied, so this library carries mixed
+    and all-caps junk types (``ISBN``, ``FICTIONDB``, ``MOBI-ASIN``). Anything
+    shown to a human or agent must use this form so it can be compared
+    against the Calibre-Web edit form and against what was written.
+    """
     rows = conn.execute(
-        "SELECT type, val FROM identifiers WHERE book = ?",
+        "SELECT type, val FROM identifiers WHERE book = ? ORDER BY id",
         (book_id,),
     ).fetchall()
     out: dict[str, str] = {}
     for r in rows:
-        t = (r["type"] or "").strip().lower()
+        t = (r["type"] or "").strip()
         v = (r["val"] or "").strip()
         if t and v:
             out[t] = v
     return out
 
 
-def _tags_for(conn: sqlite3.Connection, book_id: int) -> frozenset[str]:
+def _identifiers_for(conn: sqlite3.Connection, book_id: int) -> dict[str, str]:
+    """Lowercase-keyed identifiers — for the cleanup pipeline's lookups only."""
+    return {t.lower(): v for t, v in _identifiers_raw_for(conn, book_id).items()}
+
+
+def _tag_names_for(conn: sqlite3.Connection, book_id: int) -> tuple[str, ...]:
+    """Stored-case tag names for one book, ordered by name (case-insensitive).
+
+    This is the form Calibre-Web displays (its ``Books.tags`` relationship is
+    ``order_by="Tags.name"``). Use this — not ``_tags_for`` — whenever the
+    result is shown to a human or an agent that will compare against what it
+    wrote: the library's canonical tags are mostly Title Case with a handful
+    of lowercase exceptions (``cookbooks``, ``nonfiction``, ``thriller``).
+    """
     rows = conn.execute(
         """
         SELECT t.name FROM tags t
         JOIN books_tags_link btl ON btl.tag = t.id
         WHERE btl.book = ?
+        ORDER BY t.name COLLATE NOCASE
         """,
         (book_id,),
     ).fetchall()
-    return frozenset((r["name"] or "").casefold() for r in rows if r["name"])
+    return tuple(r["name"] for r in rows if r["name"])
+
+
+def _tags_for(conn: sqlite3.Connection, book_id: int) -> frozenset[str]:
+    """Casefolded tag set — for membership checks in the cleanup pipeline only."""
+    return frozenset(t.casefold() for t in _tag_names_for(conn, book_id))
 
 
 def _language_for(conn: sqlite3.Connection, book_id: int) -> str | None:

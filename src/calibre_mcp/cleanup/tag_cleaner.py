@@ -22,6 +22,9 @@ Pass 2 — canonical merges: known near-duplicate pairs (Non-Fiction→Nonfictio
 
 Pass 3 — compound tag triage: semicolon / ampersand compound tags.
          Handled separately once the list is clean from passes 1+2.
+
+Pass 4 — ampersand tag triage: merge near-duplicate genre compounds into
+         canonical tags; delete LCSH sub-category and gaming catch-all tags.
 """
 
 from __future__ import annotations
@@ -123,6 +126,35 @@ _IMPORT_ARTIFACT_RE = re.compile(r'^[A-Za-z]+\d{3,}$')
 # Garbled multi-value tags where commas became "m " — e.g. "Cookbooksm Cookingm Foodm"
 _GARBLED_M_RE = re.compile(r'\w+m\s+\w+m\s+')
 
+# LCSH author-as-tag: "Niven; Larry - Prose & Criticism", "King; Stephen - Prose & Criticism"
+_AUTHOR_LCSH_RE = re.compile(r';\s*\w+.*-\s*(Prose\s*&\s*)?Criticism', re.IGNORECASE)
+
+# LCSH fictitious-character tags (truncated in Calibre): "Wiggin; Ender (Fictitious char"
+_FICTITIOUS_RE = re.compile(r'\(Fictitious', re.IGNORECASE)
+
+# Geographic with internal semicolon: "Manhattan (New York; N.Y.)", "Wall Street (New York; N.Y.)"
+_GEO_SEMI_RE = re.compile(r'\([^)]*;[^)]*\)')
+
+# ── Additional Pass 1 patterns (Phase A) ────────────────────────────────────
+
+# Acclaimed.* internal review-list tags  e.g. "Acclaimed.Dark Thoughts"
+_ACCLAIMED_RE = re.compile(r'^Acclaimed\.')
+
+# Garbled single-lowercase-letter + genre word (import artifact)
+# e.g. "n Fiction", "r Mystery", "s Science Fiction"
+_GARBLED_LETTER_GENRE_RE = re.compile(
+    r'^[a-z]\s+(Fiction|Mystery|Horror|Fantasy|Thriller|Science\s+Fiction)$'
+)
+
+# LCSH lifespan/date lines: "1934-"  "1948-"  "1485?-1540"
+_LCSH_LIFESPAN_RE = re.compile(r'^\d{4}\??[-–]\d{0,4}$')
+
+# BISAC underscore slugs: FICTION_FANTASY_GENERAL
+_BISAC_SLUG_RE = re.compile(r'^[A-Z]{2,}(_[A-Z]{2,}){1,}$')
+
+# Fiction.Genre / Fiction:Genre import format artifacts  e.g. "Fiction.Heroic Fantasy"
+_FICTION_DOT_COLON_RE = re.compile(r'^Fiction[.:][A-Za-z]')
+
 
 # ---------------------------------------------------------------------------
 # Pass 2: hardcoded canonical merge pairs
@@ -138,7 +170,408 @@ CANONICAL_MERGES: list[tuple[str, str]] = [
     ("Thrillers & Suspense",   "Thriller"),
     # Leave 'history' (441) and 'Historical' (299) alone — distinct meanings.
     # Leave 'Star Trek' (64) — may carry non-fiction books, decide later.
-    # Leave compound & tags for Pass 3.
+]
+
+
+# ---------------------------------------------------------------------------
+# Pass 3: compound & tag cleanup
+# ---------------------------------------------------------------------------
+
+# Merge these into the canonical single-concept tag.
+# Books that had the compound almost certainly have both halves individually.
+COMPOUND_MERGES: list[tuple[str, str]] = [
+    ("Sci-Fi & Fantasy",           "Science Fiction"),
+    ("Collections & Anthologies",  "Anthologies"),
+    ("Anthologies & Short Stories", "Anthologies"),
+    ("Crime & mystery",            "Mystery"),
+    ("Crime & Thriller",           "Thriller"),
+    ("Crime & Mystery Fiction",    "Mystery"),
+]
+
+# Delete outright — redundant Amazon-category compounds whose component tags
+# already exist on the same books, or too-broad to be useful.
+COMPOUND_DELETES: list[str] = [
+    "Science Fiction & Fantasy",
+    "Literature & Fiction",
+    "Fantasy & Magic",
+    "General & Literary Fiction",
+    "Modern & contemporary fiction (post c 1945)",
+    "American Mystery & Suspense Fiction",
+    "Mystery; Thriller & Suspense",       # last remaining big semicolon tag
+    "Science Fiction; Fantasy & Scary Stories",
+    "Body; Mind & Spirit",
+    "Novels; other prose & writers",
+    "Words; Language & Grammar",
+    "Writing; Research & Publishing Guides",
+    "Aeronautics; Astronautics & Space Science",
+    "Voyages; Imaginary",
+    # Small-count single-semicolon leftovers not caught by patterns
+    "Aeronautics; Commercial",
+    "Airplanes; Military",
+    "Naval History; Modern",
+    "Beauty; Personal",
+]
+
+
+# ---------------------------------------------------------------------------
+# Pass 4: ampersand tag triage
+# ---------------------------------------------------------------------------
+
+# Near-duplicate genre compounds → canonical single-concept tags.
+PASS4_MERGES: list[tuple[str, str]] = [
+    # Science Fiction
+    ("Sci Fi & Fantasy",                      "Science Fiction"),
+    ("Teens - Science Fiction & Fantasy",     "Science Fiction"),
+    # Audience
+    ("Teen & Young Adult",                    "Young Adult"),
+    # Thriller
+    ("Thriller & Suspense",                   "Thriller"),
+    ("Mysteries & Thrillers",                 "Thriller"),
+    # Mystery
+    ("Mystery & Suspense",                    "Mystery"),
+    ("Mysteries & Detective Stories",         "Mystery"),
+    ("International Mystery & Crime",         "Mystery"),
+    ("International Crime & Mystery",         "Mystery"),
+    ("Mystery & Crime",                       "Mystery"),
+    ("English Mystery & Suspense Fiction",    "Mystery"),
+    ("detective & mystery",                   "Mystery"),
+    # Horror
+    ("Horror & Supernatural",                 "Horror"),
+    # Short stories / anthologies
+    ("Short Stories & Novellas",              "Short Stories"),
+    ("Short Stories & Anthologies",           "Short Stories"),
+    ("Fiction anthologies & collections",     "Anthologies"),
+    ("Anthologies & Literature Collections",  "Anthologies"),
+    # Fiction
+    ("Fiction & Literature",                  "Fiction"),
+    # D&D
+    ("D&D",                                   "Dungeons & Dragons"),
+    # Cookbook technique
+    ("Methods - Quick & Easy",                "Quick & Easy"),
+    # Fan fiction
+    ("Pride and Prejudice & Related Fandoms", "Pride & Prejudice"),
+    # Military
+    ("Military & Wars",                       "War & Military"),
+    # Espionage
+    ("Espionage & spy thriller",              "Espionage"),
+]
+
+# Delete: LCSH sub-category noise, gaming catch-alls, and compound tags
+# where books already carry all the component genre tags individually.
+PASS4_DELETES: list[str] = [
+    # Cookbook LCSH and Amazon sub-category junk
+    "Courses & Dishes",
+    "Courses & Dishes - General",
+    "Courses & Dishes - Bread",
+    "Food & Drink",
+    "Food & Drink: General",
+    "Food & Drinks",
+    "Food & Wine",
+    "Cooking & Food",
+    "Cooking; Food & Wine",
+    "Drinks & Beverages",
+    "Beverages - Wine & Spirits",
+    "Agriculture & Food",
+    "Individual Chefs & Restaurants",
+    "National & Regional Cuisine",
+    "General cookery & recipes",
+    "Cookery dishes & courses",
+    "Cookings/Courses & Dishes Appetizers",
+    "Health & Healing - Weight Control",
+    "Methods - Canning & Preserving",
+    # Technology & Business Amazon sub-headings (keep the parent tags)
+    "TECHNOLOGY & ENGINEERING / Robotics",
+    "TECHNOLOGY & ENGINEERING / Electronics / General",
+    "TECHNOLOGY & ENGINEERING / Aeronautics & Astronautics",
+    "Business & Economics / Leadership",
+    "Business & Economics / Time Management",
+    "Business & Economics / General",
+    "BUSINESS & ECONOMICS / Consumer Behavior",
+    # Gaming/paranormal catch-alls (books already have constituent tags)
+    "Role Playing & Fantasy",
+    "Science Fiction & Fantasy Gaming",
+    "Occult & Supernatural",
+    "Paranormal & Urban",
+    # LCSH junk / abbreviations / noise
+    "People & Places",
+    "British & Irish",
+    "Russian & Former Soviet Union",
+    "Video & Electronic",
+    "nic & nigel",
+    "S&S",
+    "Twists & Turns",
+    "Performing Arts/Film & Video/History & Criticism",
+    "Collections & anthologies of various literary forms",
+    "Fiction & related items",
+    "Arts & Entertainment",
+    # LCSH author-name fragments (the full form is caught by pattern; these are remnants)
+    "C.J. - Prose & Criticism",
+    "Walter M. - Prose & Criticism",
+    "Philip K. - Prose & Criticism",
+    "Umberto - Prose & Criticism",
+    "William - Prose & Criticism",
+    # Old D&D abbreviation (1 book; already has Dungeons & Dragons tag)
+    "od&d",
+    # LCSH geo/nationality sub-variants
+    "Indian & South Asian",
+    "Caribbean & Latin America",
+    "Caribbean & Latin American",
+    "Spanish & Portuguese",
+    "Regional & Ethnic - Chinese",
+    "Regional & Ethnic - American - General",
+]
+
+
+# ---------------------------------------------------------------------------
+# Pass 5: food / drink tag consolidation
+# ---------------------------------------------------------------------------
+
+PASS5_MERGES: list[tuple[str, str]] = [
+    # Food umbrella — broad BISAC/Amazon duplicates merge into Food
+    ("Food and Drink",     "Food"),
+    ("Gastronomy",         "Food"),
+    ("Gourmet",            "Food"),
+    ("Culinary",           "Food"),
+    # Keto/low-carb family — merge into the most-used combined label
+    ("ketogenic diet",        "Keto/Low-Carb"),
+    ("Low Carbohydrate",      "Keto/Low-Carb"),
+    ("Low-carbohydrate diet", "Keto/Low-Carb"),
+    # Mystery sub-genres
+    ("food mystery",          "culinary mystery"),
+    ("Food mysteries",        "culinary mystery"),
+    ("culinary cozy",         "culinary mystery"),
+    # Spirits family
+    ("Spirit",    "Spirits"),
+    ("liquor",    "Spirits"),
+    ("Liquors",   "Spirits"),
+    ("Distilling","Spirits"),
+    # Whiskey — merge Scotch spelling into the larger American-spelling tag,
+    # then rename the lowercase winner to title case
+    ("Whisky",   "whiskey"),   # merge first (whiskey exists, Whiskey doesn't yet)
+    ("whiskey",  "Whiskey"),   # rename in-place to title case
+    # Beer
+    ("craft beer", "Beer"),
+]
+
+PASS5_DELETES: list[str] = [
+    # Keto/low-carb keyword-stuffed singletons
+    "keto adapted",
+    "keto clarity",
+    "keto cookbook",
+    "keto diet for beginners",
+    "keto diet recipes",
+    "ketogenic cookbook",
+    "ketogenic diet recipes",
+    "ketogenic recipes",
+    "low carb diet",
+    "low carb diet for beginners",
+    "low carb essential",
+    "low carb high fat",
+    "low carb weight loss",
+    "low carbohydrate diet",
+    "atkins diet",
+    "atkins diet for beginners",
+    "paleo approach",
+    "paleo diet for beginners",
+    # Japanese keyword-stuffed singletons (all 1-book title/keyword tags)
+    "Japanese Cocktails Cookbook",
+    "Japanese Cocktails Cooking",
+    "Japanese Cocktails Dish",
+    "Japanese Cocktails Food",
+    "Japanese Cocktails Meal",
+    "Japanese Cocktails Recipe Book",
+    "Japanese Cocktails Recipes",
+    "Japanese appetizers",
+    "Japanese comfort food",
+    "Japanese cooking book",
+    "Japanese food culture",
+    "Japanese Ramen Cookbook",
+    "Japanese rice bowls",
+    "Japanese small plates",
+    "Japanese street food",
+    "izakaya recipes",
+    "Ramen",
+    "ramen cookbook",
+    "ramen recipes",
+    "Sushi",
+    # Food junk
+    "Food and Drin",           # truncated typo
+    "food picks thanksgiving",
+    "Food*Cooking*Ingredient*Meat",  # garbled
+    "Food Industry",
+    "Food additives",
+    "Food Preservation",
+    "Drinking cups",
+    "Drinking customs",
+    "drinking wine",
+    "Cookery (Pasta)",
+    "Cooking (Pasta)",
+    "Cookery by ingredient",
+    "Cooking on a Bootstrap",
+    "Cooking with specific gadgets",
+    "Cooks",
+    "RecipeTin Eats",
+    "Cookbooks/Italian",       # slash-format artifact
+    "Baking - Confectionery",
+    "recipes",                 # redundant on cookbook books
+    # Dietary singletons
+    "vegan cookbook",
+    "vegetarian cookbook",
+    "Non-Vegetarion",          # typo
+    "time tested vegetarian recipes",
+    "vegetarian Indian cooking",
+    # Beer/spirits noise
+    "Beer Guide",
+    "brewery",
+    "Brewing Industry",
+    "Distillers",
+    "wine 101",
+    "wine a day",
+    "wine alcohol",
+    "wine fiction",
+    "wine lover",
+    "wine novel",
+    "Wine novels",
+    "Wine Trail Series",
+    "Winer",                   # typo
+    "winery mystery",
+    "Wine Guide",
+    "Cocktail servers",
+    "Cocktail servers - Louisiana",
+]
+
+
+# ---------------------------------------------------------------------------
+# Pass 6: genre near-duplicate merges + hardcoded junk deletes
+# ---------------------------------------------------------------------------
+
+PASS6_MERGES: list[tuple[str, str]] = [
+    # Mystery near-duplicates → Mystery
+    ("murder mystery",                     "Mystery"),
+    ("murder mystery series",              "Mystery"),
+    ("Mystery and detective stories",      "Mystery"),
+    ("Mystery And Suspense Fiction",       "Mystery"),
+    ("detective fiction",                  "Mystery"),
+    ("Detective and Mystery Fiction",      "Mystery"),
+    ("mystery and detective",              "Mystery"),
+    ("magic & mystery",                    "Mystery"),
+    ("womens mystery",                     "Mystery"),
+    ("women mystery",                      "Mystery"),
+    # Cozy Mystery variants
+    ("Mystery Cozy",                       "Cozy Mystery"),
+    ("cosy mystery",                       "Cozy Mystery"),
+    ("witch mystery",                      "Cozy Mystery"),
+    ("witch cozy mystery",                 "Cozy Mystery"),
+    ("flower shop mystery",                "Cozy Mystery"),
+    ("Paranormal Cozy Mystery",            "Cozy Mystery"),
+    ("christmas mystery",                  "Cozy Mystery"),
+    ("dog mystery",                        "Cozy Mystery"),
+    # Thriller variants → Thriller
+    ("Crime Thriller",                     "Thriller"),
+    ("Fiction.Thriller/Suspense",          "Thriller"),
+    ("Fiction:Thriller",                   "Thriller"),
+    ("Horror Thriller",                    "Thriller"),
+    ("Domestic Thriller",                  "Thriller"),
+    ("Supernatural Thriller",              "Thriller"),
+    ("Crime Mystery Thriller",             "Thriller"),
+    ("Mysteries & Thrillers",              "Thriller"),
+    # Science Fiction typos/variants → Science Fiction
+    ("Scicnce Fiction",                    "Science Fiction"),
+    ("Sscience Fiction",                   "Science Fiction"),
+    ("lcsh: Science Fiction",              "Science Fiction"),
+    ("sci fi and fantasy",                 "Science Fiction"),
+    ("Science fiction stories",            "Science Fiction"),
+    ("sf-fantasy",                         "Science Fiction"),
+    ("Star Wars fiction",                  "Science Fiction"),
+    # Horror variants → Horror
+    ("Horror stories",                     "Horror"),
+    ("body horror",                        "Horror"),
+    ("british horror",                     "Horror"),
+    ("Southern horror",                    "Horror"),
+    ("feminist horror",                    "Horror"),
+    ("historical horror",                  "Horror"),
+    ("ghost stories",                      "Horror"),
+    # Fantasy variants → Fantasy
+    ("heroic fantasy",                     "Fantasy"),
+    ("regional fantasy",                   "Fantasy"),
+    ("rural fantasy",                      "Fantasy"),
+    ("contemporary fantasy",               "Fantasy"),
+    ("fantasy adventure",                  "Fantasy"),
+    # Young Adult variants → Young Adult
+    ("Young Adult Fiction",                "Young Adult"),
+    ("Fiction-Young Adult",                "Young Adult"),
+    ("Children's Books - Young Adult Fiction", "Young Adult"),
+    ("teen fiction",                       "Young Adult"),
+    ("Fantasy (Young Adult)",              "Young Adult"),
+    # Short Stories / Flash
+    ("flash fiction",                      "Short Stories"),
+    ("Short Fiction",                      "Short Stories"),
+    ("Science fiction short stories",      "Short Stories"),
+    ("Fantasy short stories",              "Short Stories"),
+    # Women's Fiction
+    ("womens fiction",                     "Women's Fiction"),
+    # Romance
+    ("romance adult fiction",              "Romance"),
+    ("Romantic suspense fiction",          "Romance"),
+    ("romance and mystery",                "Romance"),
+]
+
+PASS6_DELETES: list[str] = [
+    # ── Typos / garbled ─────────────────────────────────────────────────────
+    "Advanture", "Aultery", "animalled", "apocalpyse",
+    "Amer", "Hiistorical Fiction", "Literacy Fiction",
+    "nepalifiction",
+    # ── Amazon / publisher catalog terms ────────────────────────────────────
+    "Adult Trade", "Adult Literary", "Adult Literature",
+    "Audio Adult: Other", "Bargain Books",
+    "Popular American Fiction", "Spanish: Adult Fiction",
+    "Biography True Crime Business Science",
+    # ── LCSH nationality + genre qualifiers (base genre already in library) ─
+    "American Horror Fiction", "English Horror Fiction",
+    "American Light Romantic Fiction",
+    "American fiction - 21st century",
+    "American Short Story Collections",
+    "American Novel And Short Story",
+    "Fiction - Men's Adventure",
+    "Fiction : Fantasy - Historical",
+    "Fiction : Science Fiction - Series",
+    "Fiction:Detective",
+    "Fiction:Historical",
+    "Settings for Fiction",
+    "Classic fiction",
+    # ── Overly specific genre+qualifier combos ───────────────────────────────
+    "rv fiction", "travel trailer fiction",
+    "Science Fiction. Military Fiction",
+    "Triangles (Interpersonal relations) Fiction",
+    "New York (State) Fiction",
+    "Genetic engineering Fiction",
+    "Swedish (Language) Contemporary Fiction",
+    "Climate Change Fiction",
+    "Space warfare Fiction",
+    "Native American Fiction",
+    "Male friendship Fiction",
+    "Feminist Science Fiction",
+    "Humor Science Fiction",
+    "Inspirational Fiction",
+    "Diary Fiction",
+    "Satirical fiction",
+    # ── Writing craft singletons (redundant with genre + Writing tags) ────────
+    "writing fantasy", "writing fiction", "writing science fiction",
+    "writing instruction", "Writing Exercises and Techniques",
+    "creative writing workbook", "write a novel",
+    # ── How-to sentence-length noise ─────────────────────────────────────────
+    "how to be a better parent", "how to lose weight", "how to raise children",
+    # ── Publisher / series / internal tags ──────────────────────────────────
+    "bards and sages", "apex book company",
+    "Anneli Lax New Mathematical Library",
+    "Adventure of the Field Theorems",
+    # ── Art / slash-format artifacts (not caught by pass 4) ──────────────────
+    "Art/Film & Video", "Art/Surrealism/Autobiography",
+    "Performing Arts / Film & Video - Screenwriting",
+    # ── Misc noise ───────────────────────────────────────────────────────────
+    "ALL", "5.0", "base", "acid", "abroad", "abstraction",
+    "aging", "anger", "api", ".Crime", "ArgonAlt",
+    "Mystery. Agatha Christie",
 ]
 
 
@@ -224,21 +657,142 @@ def scan(cal: sqlite3.Connection) -> ScanResult:
             ops.append(TagOp("delete", name, None, "LCSH nationality qualifier", cnt, pass_num=1))
             continue
 
+        # LCSH author-as-tag  e.g. "King; Stephen - Prose & Criticism"
+        if _AUTHOR_LCSH_RE.search(name):
+            ops.append(TagOp("delete", name, None, "LCSH author tag", cnt, pass_num=1))
+            continue
+
+        # LCSH fictitious-character tags  e.g. "Wiggin; Ender (Fictitious char"
+        if _FICTITIOUS_RE.search(name):
+            ops.append(TagOp("delete", name, None, "LCSH fictitious-character tag", cnt, pass_num=1))
+            continue
+
+        # Geographic with internal semicolon  e.g. "Manhattan (New York; N.Y.)"
+        if ";" in name and _GEO_SEMI_RE.search(name):
+            ops.append(TagOp("delete", name, None, "LCSH geographic (internal semicolon)", cnt, pass_num=1))
+            continue
+
+        # Acclaimed.* internal review-list tags
+        if _ACCLAIMED_RE.match(name):
+            ops.append(TagOp("delete", name, None, "Acclaimed.* review-list tag", cnt, pass_num=1))
+            continue
+
+        # Garbled single-letter prefix: "n Fiction", "r Mystery"
+        if _GARBLED_LETTER_GENRE_RE.match(name):
+            ops.append(TagOp("delete", name, None, "garbled letter-prefix tag", cnt, pass_num=1))
+            continue
+
+        # LCSH lifespan: "1934-" / "1485?-1540"
+        if _LCSH_LIFESPAN_RE.match(name):
+            ops.append(TagOp("delete", name, None, "LCSH lifespan/date tag", cnt, pass_num=1))
+            continue
+
+        # BISAC underscore slug: FICTION_FANTASY_GENERAL
+        if _BISAC_SLUG_RE.match(name):
+            ops.append(TagOp("delete", name, None, "BISAC underscore slug", cnt, pass_num=1))
+            continue
+
+        # Fiction.Genre / Fiction:Genre format artifacts
+        if _FICTION_DOT_COLON_RE.match(name):
+            ops.append(TagOp("delete", name, None, "Fiction.Genre format artifact", cnt, pass_num=1))
+            continue
+
     # ── Pass 2: canonical merges ────────────────────────────────────────────
-    source_tags_in_pass1 = {o.source_tag for o in ops}  # don't double-queue
+    queued = {o.source_tag for o in ops}
 
     for src, dst in CANONICAL_MERGES:
-        if src not in tag_counts or src in source_tags_in_pass1:
+        if src not in tag_counts or src in queued:
             continue
         cnt = tag_counts[src]
         if dst in tag_counts:
-            # Destination already exists → merge (redirect books, drop source)
             ops.append(TagOp("merge", src, dst,
                              f"canonical duplicate of {dst!r}", cnt, pass_num=2))
         else:
-            # Destination doesn't exist yet → rename in place
             ops.append(TagOp("rename", src, dst,
                              f"rename to canonical form {dst!r}", cnt, pass_num=2))
+        queued.add(src)
+
+    # ── Pass 3: compound & tag cleanup ─────────────────────────────────────
+    # Redundant Amazon-style category compounds — books already carry the
+    # individual genre tags (Science Fiction, Fantasy, Mystery, etc.)
+    for src, dst in COMPOUND_MERGES:
+        if src not in tag_counts or src in queued:
+            continue
+        cnt = tag_counts[src]
+        if dst in tag_counts:
+            ops.append(TagOp("merge", src, dst,
+                             f"compound → canonical {dst!r}", cnt, pass_num=3))
+        else:
+            ops.append(TagOp("rename", src, dst,
+                             f"rename compound to {dst!r}", cnt, pass_num=3))
+        queued.add(src)
+
+    for src in COMPOUND_DELETES:
+        if src not in tag_counts or src in queued:
+            continue
+        ops.append(TagOp("delete", src, None,
+                         "redundant Amazon-style compound tag", tag_counts[src], pass_num=3))
+        queued.add(src)
+
+    # ── Pass 4: ampersand tag triage ───────────────────────────────────────
+    for src, dst in PASS4_MERGES:
+        if src not in tag_counts or src in queued:
+            continue
+        cnt = tag_counts[src]
+        if dst in tag_counts:
+            ops.append(TagOp("merge", src, dst,
+                             f"compound → canonical {dst!r}", cnt, pass_num=4))
+        else:
+            ops.append(TagOp("rename", src, dst,
+                             f"rename compound to {dst!r}", cnt, pass_num=4))
+        queued.add(src)
+
+    for src in PASS4_DELETES:
+        if src not in tag_counts or src in queued:
+            continue
+        ops.append(TagOp("delete", src, None,
+                         "LCSH/compound tag noise", tag_counts[src], pass_num=4))
+        queued.add(src)
+
+    # ── Pass 5: food/drink tag consolidation ──────────────────────────────
+    for src, dst in PASS5_MERGES:
+        if src not in tag_counts or src in queued:
+            continue
+        cnt = tag_counts[src]
+        if dst in tag_counts:
+            ops.append(TagOp("merge", src, dst,
+                             f"food consolidation → {dst!r}", cnt, pass_num=5))
+        else:
+            ops.append(TagOp("rename", src, dst,
+                             f"food consolidation rename → {dst!r}", cnt, pass_num=5))
+        queued.add(src)
+
+    for src in PASS5_DELETES:
+        if src not in tag_counts or src in queued:
+            continue
+        ops.append(TagOp("delete", src, None,
+                         "food tag noise/keyword-stuffing", tag_counts[src], pass_num=5))
+        queued.add(src)
+
+    # ── Pass 6: genre near-duplicates + hardcoded junk ─────────────────────
+    for src, dst in PASS6_MERGES:
+        if src not in tag_counts or src in queued:
+            continue
+        cnt = tag_counts[src]
+        if dst in tag_counts:
+            ops.append(TagOp("merge", src, dst,
+                             f"genre near-duplicate → {dst!r}", cnt, pass_num=6))
+        else:
+            ops.append(TagOp("rename", src, dst,
+                             f"genre rename → {dst!r}", cnt, pass_num=6))
+        queued.add(src)
+
+    for src in PASS6_DELETES:
+        if src not in tag_counts or src in queued:
+            continue
+        ops.append(TagOp("delete", src, None,
+                         "junk/noise tag", tag_counts[src], pass_num=6))
+        queued.add(src)
 
     return ScanResult(
         total_tags=len(tag_counts),
@@ -380,7 +934,8 @@ def apply_ops(
                     _mark_applied(ops_conn, op.source_tag)
 
             elif op.op == "rename":
-                if _tag_id(cal, op.target_tag) is not None:
+                dst_id = _tag_id(cal, op.target_tag)
+                if dst_id is not None and dst_id != src_id:
                     result.errors.append(
                         f"rename {op.source_tag!r}→{op.target_tag!r}: "
                         f"target already exists — use merge instead"
@@ -399,6 +954,8 @@ def apply_ops(
     if not dry_run:
         cal.execute("COMMIT")
         cal.execute("BEGIN")
+        ops_conn.execute("COMMIT")
+        ops_conn.execute("BEGIN")
 
     return result
 

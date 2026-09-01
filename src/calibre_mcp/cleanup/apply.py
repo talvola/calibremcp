@@ -41,6 +41,11 @@ _APPLICABLE_SCALAR_FIELDS: frozenset[str] = frozenset({"title", "publisher", "pu
 # via the 'identifier.<scheme>' prefix convention.
 _IDENTIFIER_FIELDS: frozenset[str] = frozenset({"isbn"})
 
+# Cover proposals: `proposed_value` is a local filesystem path; calibredb
+# accepts it as a regular --field=cover:<path>. (`set_cover` doesn't exist
+# as a subcommand in current calibredb; --field=cover:... is the API.)
+_COVER_FIELD = "cover"
+
 
 def _is_applicable(field: str) -> bool:
     """True for every proposal field the current apply pipeline can handle.
@@ -48,6 +53,7 @@ def _is_applicable(field: str) -> bool:
     Includes:
       * scalar fields (publisher, pubdate, description, series, series_index)
       * ``isbn`` and ``identifier.<scheme>`` (merged into the identifiers dict)
+      * ``identifier.delete`` (proposed_value = scheme name to remove)
       * ``tags.add`` (merged into Calibre's tags list)
       * ``tag.delete`` / ``tag.merge`` (tag-level ops; expanded per-book)
     """
@@ -56,6 +62,7 @@ def _is_applicable(field: str) -> bool:
         or field in _IDENTIFIER_FIELDS
         or field.startswith("identifier.")
         or field == "tags.add"
+        or field == _COVER_FIELD
         or field in _TAG_OP_FIELDS
         or field in _AUTHOR_OP_FIELDS
     )
@@ -207,8 +214,10 @@ def plan(
         for book_id in all_book_ids:
             book_rows = by_book.get(book_id, [])
             argv: list[str] = [calibredb, "set_metadata", f"--library-path={library_path}"]
+            argv_base_len = len(argv)
             fields_map: dict[str, str] = {}
             identifier_updates: dict[str, str] = {}
+            identifier_deletes: set[str] = set()  # casefolded scheme names
             tag_additions: list[str] = []
 
             for row in book_rows:
@@ -216,20 +225,34 @@ def plan(
                 value = row["proposed_value"]
                 fields_map[field] = value
 
-                if field == "isbn":
+                if field == "identifier.delete":
+                    # proposed_value is the scheme name (e.g. "pub-id")
+                    identifier_deletes.add(value.strip().lower())
+                elif field == "isbn":
                     identifier_updates["isbn"] = value
                 elif field.startswith("identifier."):
                     scheme = field.split(".", 1)[1]
                     identifier_updates[scheme] = value
                 elif field == "tags.add":
                     tag_additions.append(value)
+                elif field == _COVER_FIELD:
+                    if not Path(value).exists():
+                        log.warning(
+                            "skipping cover for book #%d: %s missing", book_id, value,
+                        )
+                        continue
+                    argv.append(f"--field=cover:{value}")
                 else:
                     calibre_field = _FIELD_ALIASES.get(field, field)
                     argv.append(f"--field={calibre_field}:{value}")
 
-            if identifier_updates:
+            if identifier_updates or identifier_deletes:
                 current = _current_identifiers(cal_conn, book_id) if cal_conn else {}
                 current.update(identifier_updates)
+                for scheme in identifier_deletes:
+                    current.pop(scheme, None)
+                # Emit even if current is now empty — that's the user's
+                # explicit intent (last identifier was junk and is being removed).
                 argv.append(f"--field=identifiers:{_format_identifiers(current)}")
 
             tag_changes = book_tag_changes.get(book_id, {})
@@ -249,15 +272,16 @@ def plan(
                 new_authors = _apply_author_ops(current_authors, author_changes)
                 argv.append(f"--field=authors:{_format_authors(new_authors)}")
 
-            argv.append(str(book_id))
-            yield ApplyCommand(
-                book_id=book_id,
-                proposal_ids=tuple(r["id"] for r in book_rows),
-                tag_op_proposal_ids=tuple(book_tag_op_ids.get(book_id, [])),
-                author_op_proposal_ids=tuple(book_author_op_ids.get(book_id, [])),
-                fields=fields_map,
-                argv=tuple(argv),
-            )
+            if len(argv) > argv_base_len:
+                argv.append(str(book_id))
+                yield ApplyCommand(
+                    book_id=book_id,
+                    proposal_ids=tuple(r["id"] for r in book_rows),
+                    tag_op_proposal_ids=tuple(book_tag_op_ids.get(book_id, [])),
+                    author_op_proposal_ids=tuple(book_author_op_ids.get(book_id, [])),
+                    fields=fields_map,
+                    argv=tuple(argv),
+                )
     finally:
         if cal_conn is not None:
             cal_conn.close()
