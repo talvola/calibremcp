@@ -202,6 +202,12 @@ def test_diff_ignores_line_ending_only_comment_changes() -> None:
     assert _diff_states(before, after) == ["  tags: 'Mystery' → 'Mystery, Crime'"]
 
 
+def test_diff_ignores_nbsp_entity_rewrite() -> None:
+    before = _state(comments="<p>one\xa0two</p>")
+    after = _state(comments="<p>one&nbsp;two</p>")
+    assert _diff_states(before, after) == []
+
+
 def test_diff_reports_real_comment_changes() -> None:
     before = _state(comments="<p>one</p>\r\n")
     after = _state(comments="<p>two</p>\n")

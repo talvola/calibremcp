@@ -656,10 +656,11 @@ def _diff_states(before, after) -> list[str]:
         b = getattr(before, field_name)
         a = getattr(after, field_name)
         if field_name == "comments":
-            # Calibre-Web's form round-trip rewrites CRLF→LF even when comments
-            # weren't edited; don't report that as a change.
-            b = b.replace("\r\n", "\n").replace("\r", "\n")
-            a = a.replace("\r\n", "\n").replace("\r", "\n")
+            # Calibre-Web's form round-trip rewrites CRLF→LF and U+00A0 →
+            # ``&nbsp;`` even when comments weren't edited; neither changes
+            # the rendered text, so don't report them as a change.
+            b = b.replace("\r\n", "\n").replace("\r", "\n").replace("\xa0", "&nbsp;")
+            a = a.replace("\r\n", "\n").replace("\r", "\n").replace("\xa0", "&nbsp;")
         if b != a:
             b_short = b if len(b) <= 80 else b[:80] + "…"
             a_short = a if len(a) <= 80 else a[:80] + "…"
