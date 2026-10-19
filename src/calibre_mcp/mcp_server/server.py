@@ -29,7 +29,7 @@ from mcp.server.fastmcp import FastMCP
 from calibre_mcp.cleanup.calibre_reader import BookRecord
 
 from .api import CalibreWebClient
-from .reader import BookSummary, CalibreReader
+from .reader import AuthorSortCheck, BookSummary, CalibreReader
 
 mcp = FastMCP(
     "calibre",
@@ -93,12 +93,14 @@ def _format_book_summary(b: BookSummary) -> str:
     return f"[{b.id}] {b.title} — {authors}{series}"
 
 
-def _format_book_detail(b: BookRecord) -> str:
+def _format_book_detail(b: BookRecord, author_sort_check: AuthorSortCheck | None = None) -> str:
     lines = [f"**{b.title}** (id={b.id})"]
     if b.authors:
         lines.append("Authors: " + " & ".join(b.authors))
     if b.author_sort:
         lines.append("Author sort: " + b.author_sort)
+    if author_sort_check is not None and (warning := _author_sort_warning(author_sort_check)):
+        lines.append(warning)
     if b.series:
         s = b.series
         if b.series_index:
@@ -147,13 +149,17 @@ def calibre_get_book(book_id: int) -> str:
 
     Authors are listed in Calibre-Web display order (driven by ``author_sort``,
     shown on its own line), joined with ``&`` like the ``authors`` write field.
+    If an ``author_sort`` piece matches no author's stored sort name, a ⚠ line
+    says so: Calibre-Web then shows that author last, so the listed order is
+    a fallback, not necessarily the intended credit.
     Tags are returned in their stored case, so the output can be compared
     directly against what ``calibre_update_book`` wrote.
     """
-    book = get_reader().get_book(book_id)
+    reader = get_reader()
+    book = reader.get_book(book_id)
     if book is None:
         return f"No book with id {book_id}."
-    return _format_book_detail(book)
+    return _format_book_detail(book, reader.check_author_sort(book_id))
 
 
 @mcp.tool()
@@ -306,14 +312,19 @@ def calibre_update_book(
       ``&``. Single-word pieces (sort form) are left alone.
     - ``author_sort``: controls **author display order**. Calibre-Web keys
       display off this field, not off the author link rows. On every form
-      save it re-derives ``author_sort`` from ``authors`` *in the order
-      given*, so normally passing ``authors`` in the desired order is enough.
+      save — *including saves that only change comments or tags* — it
+      re-derives ``author_sort`` from the authors in their currently displayed
+      order, so normally passing ``authors`` in the desired order is enough.
       Supply ``author_sort`` explicitly (``"Last, First & Last, First"``,
-      surnames in display order) when you need to override that derivation.
-      Setting both makes two writes (form POST then AJAX); the AJAX call runs
-      after the form POST so it wins. ``calibre_get_book`` shows the stored
-      value on its ``Author sort:`` line, and this tool's diff reports the
-      real before/after value.
+      surnames in display order) only when you need to override that
+      derivation. Each piece must be one of the book's authors' **stored**
+      sort names (Calibre-Web matches exactly; a piece like ``"Cast, Pc"``
+      for stored ``"Cast, PC"`` silently pushes that author to the end).
+      The tool fixes case-only differences and refuses anything else, listing
+      the valid names. Setting both makes two writes (form POST then AJAX);
+      the AJAX call runs after the form POST so it wins. ``calibre_get_book``
+      shows the stored value on its ``Author sort:`` line, and this tool's
+      diff reports the real before/after value.
     - ``tags``: comma-separated string; full replacement of existing tags.
     - ``series``: bare series name; pair with ``series_index`` to set the position.
       Setting ``series`` alone on a book with no prior index stores ``1.0``
@@ -329,6 +340,7 @@ def calibre_update_book(
     cw = get_calibre_web()
     before = cw.get_book_form_state(book_id)
     author_sort_before = _read_author_sort(book_id)
+    check_before = _check_author_sort(book_id)
 
     updates: dict[str, Any] = {}
     if title is not None:
@@ -354,11 +366,19 @@ def calibre_update_book(
 
     cw.edit_book(book_id, updates, identifiers=identifiers)
 
+    notes: list[str] = []
+
     # author_sort goes through a separate AJAX endpoint, applied AFTER the
     # form post so it overrides Calibre-Web's auto-derivation from authors.
+    # Validated against the post-form authors, since a mismatched piece would
+    # silently reorder the displayed credit.
     author_sort_after: str | None = None
     if author_sort is not None:
-        author_sort_after = cw.set_author_sort(book_id, author_sort)
+        resolved, problem = _resolve_author_sort(author_sort, _check_author_sort(book_id))
+        if problem is not None:
+            notes.append(f"  author_sort NOT applied: {problem}")
+        else:
+            author_sort_after = cw.set_author_sort(book_id, resolved)
 
     # Read-back to confirm + show the diff.
     after = cw.get_book_form_state(book_id)
@@ -371,10 +391,22 @@ def calibre_update_book(
     # form's ``authors`` string (rendered in author_sort order) can hide.
     if author_sort_after is None:
         author_sort_after = _read_author_sort(book_id)
-    if author_sort_after is not None and author_sort_after != (author_sort_before or ""):
+    author_sort_changed = author_sort_after is not None and author_sort_after != (author_sort_before or "")
+    if author_sort_changed:
         diffs.append(f"  author_sort: {author_sort_before or ''!r} → {author_sort_after!r}")
+        if authors is None and author_sort is None and check_before is not None and not check_before.consistent:
+            unmatched = ", ".join(repr(p) for p in check_before.unmatched)
+            notes.append(
+                f"  note: author_sort was already out of sync ({unmatched} matched no author), so Calibre-Web "
+                "was showing those authors last. Every form save re-derives author_sort from the displayed "
+                "order, so this edit made that order permanent; the visible credit did not change. If it is "
+                "wrong, call again with authors in the intended order."
+            )
 
-    notes: list[str] = []
+    check_after = _check_author_sort(book_id)
+    if check_after is not None and (warning := _author_sort_warning(check_after)):
+        notes.append(warning)
+
     if (
         series is not None
         and series_index is None
@@ -396,6 +428,63 @@ def _read_author_sort(book_id: int) -> str | None:
         return get_reader().get_author_sort(book_id)
     except Exception:  # noqa: BLE001 — diagnostics only, never fail a write over it
         return None
+
+
+def _check_author_sort(book_id: int) -> AuthorSortCheck | None:
+    """Best-effort :meth:`CalibreReader.check_author_sort`; None if metadata.db is unavailable."""
+    try:
+        return get_reader().check_author_sort(book_id)
+    except Exception:  # noqa: BLE001 — diagnostics only, never fail a write over it
+        return None
+
+
+def _author_sort_warning(check: AuthorSortCheck) -> str | None:
+    """A ⚠ line when ``author_sort`` has pieces Calibre-Web can't match to an author."""
+    if check.consistent:
+        return None
+    unmatched = ", ".join(repr(p) for p in check.unmatched)
+    stored = " & ".join(check.author_sorts)
+    return (
+        f"  ⚠ author_sort out of sync: {unmatched} matches no author's stored sort ({stored!r}). "
+        "Calibre-Web shows unmatched authors last, so the Authors order may not be the intended credit. "
+        "Fix with calibre_update_book(authors=...) in the intended order."
+    )
+
+
+def _resolve_author_sort(value: str, check: AuthorSortCheck | None) -> tuple[str, str | None]:
+    """Map a caller's ``author_sort`` onto the book's stored author sort names.
+
+    Calibre-Web orders the credit by exact matches between ``author_sort``
+    pieces and ``authors.sort``, so the override must name each linked author
+    exactly once, spelled as stored. Case-only differences are corrected;
+    anything else returns ``(value, problem)`` and the caller must not write.
+    Without a readable metadata.db there's nothing to check against, so the
+    value passes through unchanged.
+    """
+    if check is None:
+        return value, None
+    stored = check.author_sorts
+    by_fold: dict[str, str] = {}
+    for s in stored:
+        by_fold.setdefault(s.strip().casefold(), s)
+    resolved: list[str] = []
+    unknown: list[str] = []
+    for piece in (p.strip() for p in value.split("&")):
+        if not piece:
+            continue
+        if piece in stored:
+            resolved.append(piece)
+        elif (hit := by_fold.get(piece.casefold())) is not None:
+            resolved.append(hit)
+        else:
+            unknown.append(piece)
+    valid = " & ".join(repr(s) for s in stored)
+    if unknown:
+        names = ", ".join(repr(p) for p in unknown)
+        return value, f"{names} matches no author on this book; use the stored sort names: {valid}."
+    if sorted(resolved) != sorted(stored):
+        return value, f"author_sort must list each of the book's authors exactly once: {valid}."
+    return " & ".join(resolved), None
 
 
 @mcp.tool()

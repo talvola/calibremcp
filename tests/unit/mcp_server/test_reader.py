@@ -70,6 +70,24 @@ def library(tmp_path: Path) -> Path:
     )
     conn.execute("INSERT INTO books_authors_link VALUES (13, 23001, 2)")
     conn.execute("INSERT INTO books_authors_link VALUES (14, 23001, 1)")
+
+    # Book 6526 (live data, 2026-10-19): author_sort says P.C. Cast first, but
+    # its piece "Cast, Pc" doesn't match the stored sort "Cast, PC", so
+    # Calibre-Web skips it and shows P.C. Cast last.
+    conn.execute(
+        "INSERT INTO books VALUES (6526, 'u4', 'Tempted', 'c', '2010-01-02', 1.0, 'Cast, Pc & Cast, Kristin', 1)"
+    )
+    conn.execute("INSERT INTO authors VALUES (20, 'P.C. Cast', 'Cast, PC')")
+    conn.execute("INSERT INTO authors VALUES (21, 'Kristin Cast', 'Cast, Kristin')")
+    conn.execute("INSERT INTO books_authors_link VALUES (15, 6526, 20)")
+    conn.execute("INSERT INTO books_authors_link VALUES (16, 6526, 21)")
+
+    # Book 23002: no author_sort piece matches, two leftovers. Link order is
+    # (2, 9) but Calibre-Web appends leftovers in set order, which is (9, 2).
+    conn.execute("INSERT INTO books VALUES (23002, 'u5', 'Junk Sort', 'j', NULL, 1.0, 'Martin & R.R., George & ', 0)")
+    conn.execute("INSERT INTO authors VALUES (9, 'George R. R. Martin', 'Martin, George R. R.')")
+    conn.execute("INSERT INTO books_authors_link VALUES (17, 23002, 2)")
+    conn.execute("INSERT INTO books_authors_link VALUES (18, 23002, 9)")
     conn.commit()
     conn.close()
     return db
@@ -95,6 +113,44 @@ def test_unmatched_author_sort_entries_are_skipped_and_leftovers_keep_link_order
     book = CalibreReader(library).get_book(23001)
     assert book is not None
     assert book.authors == ("William Murray", "James Kavanagh")
+
+
+def test_mismatched_author_sort_piece_pushes_that_author_last(library: Path) -> None:
+    book = CalibreReader(library).get_book(6526)
+    assert book is not None
+    assert book.authors == ("Kristin Cast", "P.C. Cast")
+
+
+def test_multiple_leftovers_follow_calibre_web_set_order_not_link_order(library: Path) -> None:
+    book = CalibreReader(library).get_book(23002)
+    assert book is not None
+    assert book.authors == ("George R. R. Martin", "James Kavanagh")
+
+
+def test_check_author_sort(library: Path) -> None:
+    reader = CalibreReader(library)
+    ok = reader.check_author_sort(22999)
+    assert ok.consistent
+    assert ok.author_sorts == ("Murray, William", "Kavanagh, James")
+    bad = reader.check_author_sort(6526)
+    assert not bad.consistent
+    assert bad.unmatched == ("Cast, Pc",)
+    assert bad.author_sorts == ("Cast, PC", "Cast, Kristin")
+    # Empty pieces from junk imports don't count; real non-matches do.
+    assert reader.check_author_sort(23002).unmatched == ("Martin", "R.R., George")
+    assert reader.check_author_sort(23000).consistent  # empty author_sort
+
+
+def test_detail_rendering_flags_out_of_sync_author_sort(library: Path) -> None:
+    reader = CalibreReader(library)
+    book = reader.get_book(6526)
+    assert book is not None
+    text = _format_book_detail(book, reader.check_author_sort(6526))
+    assert "Authors: Kristin Cast & P.C. Cast" in text
+    assert "⚠ author_sort out of sync: 'Cast, Pc'" in text
+    clean = reader.get_book(22999)
+    assert clean is not None
+    assert "⚠" not in _format_book_detail(clean, reader.check_author_sort(22999))
 
 
 def test_search_results_use_display_order(library: Path) -> None:

@@ -50,23 +50,9 @@ def open_library(metadata_db: Path | str) -> Iterator[sqlite3.Connection]:
         conn.close()
 
 
-def _display_authors_for(conn: sqlite3.Connection, book_id: int) -> tuple[tuple[str, ...], str | None]:
-    """Authors in **Calibre-Web display order**, plus the raw ``author_sort``.
-
-    Calibre-Web does not order authors by ``books_authors_link.id`` (Calibre
-    desktop's order). Its ``order_authors()`` walks ``books.author_sort``,
-    splits on ``&``, and emits each author whose ``authors.sort`` matches, in
-    that sequence; anything left over is appended in link order. Editing
-    authors through the Calibre-Web form never rewrites existing link rows,
-    so link order goes stale the moment a book's author order is changed via
-    Calibre-Web — reading link order would then contradict what Erik sees.
-
-    We mirror ``order_authors`` exactly so ``calibre_get_book`` agrees with
-    the Calibre-Web edit form and detail page.
-    """
-    row = conn.execute("SELECT author_sort FROM books WHERE id = ?", (book_id,)).fetchone()
-    author_sort = _strip_or_none(row["author_sort"]) if row else None
-    links = conn.execute(
+def _linked_authors(conn: sqlite3.Connection, book_id: int) -> list[sqlite3.Row]:
+    """The book's ``(id, name, sort)`` author rows in link order."""
+    return conn.execute(
         """
         SELECT a.id, a.name, a.sort FROM authors a
         JOIN books_authors_link bal ON bal.author = a.id
@@ -75,19 +61,73 @@ def _display_authors_for(conn: sqlite3.Connection, book_id: int) -> tuple[tuple[
         """,
         (book_id,),
     ).fetchall()
-    remaining: dict[int, str] = {int(r["id"]): r["name"] for r in links if r["name"]}
-    by_sort: dict[str, int] = {}
+
+
+def _display_authors_for(conn: sqlite3.Connection, book_id: int) -> tuple[tuple[str, ...], str | None]:
+    """Authors in **Calibre-Web display order**, plus the raw ``author_sort``.
+
+    Calibre-Web does not order authors by ``books_authors_link.id`` (Calibre
+    desktop's order). Its ``order_authors()`` (``cps/db.py``, 0.6.26) walks
+    ``books.author_sort``, splits on ``&``, and emits each author whose
+    ``authors.sort`` matches the piece **exactly** (case-sensitive), in that
+    sequence. Pieces that match nobody are skipped, and the unmatched authors
+    are appended in Python ``set`` iteration order — which is why a
+    mismatched piece like ``Cast, Pc`` (author sort ``Cast, PC``) pushes that
+    author to the end of the credit. Editing authors through the Calibre-Web
+    form never rewrites existing link rows, so link order goes stale the
+    moment a book's author order is changed via Calibre-Web — reading link
+    order would then contradict what Erik sees.
+
+    We mirror ``order_authors`` exactly (dict/set semantics included) so
+    ``calibre_get_book`` agrees with the Calibre-Web edit form and detail page.
+    """
+    row = conn.execute("SELECT author_sort FROM books WHERE id = ?", (book_id,)).fetchone()
+    raw_sort = row["author_sort"] if row else None
+    links = [r for r in _linked_authors(conn, book_id) if r["name"]]
+    by_sort: dict[str, sqlite3.Row] = {}
+    by_id: dict[int, sqlite3.Row] = {}
     for r in links:
-        if r["sort"] and r["sort"].strip() not in by_sort:
-            by_sort[r["sort"].strip()] = int(r["id"])
+        by_sort[r["sort"]] = r  # last one wins, like Calibre-Web
+        by_id[int(r["id"])] = r
+    ids_remaining = set(by_id)
 
     ordered: list[str] = []
-    for piece in (author_sort or "").split("&"):
-        aid = by_sort.get(piece.strip())
-        if aid is not None and aid in remaining:
-            ordered.append(remaining.pop(aid))
-    ordered.extend(remaining.values())  # dict preserves link order for leftovers
-    return tuple(ordered), author_sort
+    for piece in (raw_sort or "").split("&"):
+        hit = by_sort.get(piece.strip())
+        if hit is not None:
+            ordered.append(hit["name"])
+            ids_remaining.discard(int(hit["id"]))
+    ordered.extend(by_id[aid]["name"] for aid in ids_remaining)  # set order, as Calibre-Web does
+    return tuple(ordered), _strip_or_none(raw_sort)
+
+
+@dataclass(frozen=True, slots=True)
+class AuthorSortCheck:
+    """How a book's ``author_sort`` lines up with its authors' ``authors.sort`` values.
+
+    ``unmatched`` lists non-empty ``author_sort`` pieces that match no linked
+    author exactly — each one means Calibre-Web is showing some author later
+    than ``author_sort`` intends. ``author_sorts`` are the linked authors'
+    stored sort values in link order (what a valid override must use).
+    """
+
+    author_sort: str | None
+    author_sorts: tuple[str, ...]
+    unmatched: tuple[str, ...]
+
+    @property
+    def consistent(self) -> bool:
+        return not self.unmatched
+
+
+def _author_sort_check_for(conn: sqlite3.Connection, book_id: int) -> AuthorSortCheck:
+    row = conn.execute("SELECT author_sort FROM books WHERE id = ?", (book_id,)).fetchone()
+    raw_sort = row["author_sort"] if row else None
+    sorts = tuple(r["sort"] for r in _linked_authors(conn, book_id) if r["name"] and r["sort"])
+    known = set(sorts)
+    pieces = [p.strip() for p in (raw_sort or "").split("&")]
+    unmatched = tuple(p for p in pieces if p and p not in known)
+    return AuthorSortCheck(author_sort=_strip_or_none(raw_sort), author_sorts=sorts, unmatched=unmatched)
 
 
 @dataclass(frozen=True, slots=True)
@@ -200,6 +240,11 @@ class CalibreReader:
         with open_library(self.metadata_db) as conn:
             row = conn.execute("SELECT author_sort FROM books WHERE id = ?", (int(book_id),)).fetchone()
             return _strip_or_none(row["author_sort"]) if row else None
+
+    def check_author_sort(self, book_id: int) -> AuthorSortCheck:
+        """Compare ``books.author_sort`` against the linked authors' sort values."""
+        with open_library(self.metadata_db) as conn:
+            return _author_sort_check_for(conn, int(book_id))
 
     def list_series(self, query: str = "", limit: int = 50) -> list[FacetCount]:
         return self._facet("series", "books_series_link", "series", query, limit)
