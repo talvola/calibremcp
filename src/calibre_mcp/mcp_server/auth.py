@@ -9,23 +9,56 @@ constructing a :class:`CalibreWebClient` seeded with that cookie.
 
 Storage is in-memory (single-instance deployment is the target). Tokens
 expire in an hour; refresh tokens rotate; everything cleans itself up.
+
+Dynamic client registration is open (Claude.ai needs it), so registration
+only accepts redirect URIs on an allowlist: https on the configured hosts
+(default claude.ai / claude.com) plus loopback for native clients. Without
+that, anyone could register a client pointing at their own server and phish
+a Calibre-Web login through our genuine login page. The login page also
+names the requesting client and the host the code will be sent to.
 """
 
 from __future__ import annotations
 
 import secrets
 import time
+from collections.abc import Iterable
 from dataclasses import dataclass, field
+from urllib.parse import urlsplit
 
 from mcp.server.auth.provider import (
     AccessToken,
     AuthorizationCode,
     AuthorizationParams,
     RefreshToken,
+    RegistrationError,
 )
 from mcp.shared.auth import OAuthClientInformationFull, OAuthToken
 
 from .api import CalibreWebClient, CalibreWebError
+
+DEFAULT_ALLOWED_REDIRECT_HOSTS: tuple[str, ...] = ("claude.ai", "claude.com")
+_LOOPBACK_HOSTS = frozenset({"localhost", "127.0.0.1", "::1"})
+
+
+def redirect_uri_problem(uri: str, allowed_hosts: Iterable[str]) -> str | None:
+    """Why ``uri`` may not be registered as a redirect URI, or None if it's fine.
+
+    Allowed: ``https`` to an exact allowlisted host, or ``http``/``https`` to
+    loopback (RFC 8252 native-app redirects — the code never leaves the
+    user's machine, so an attacker can't receive it).
+    """
+    parts = urlsplit(uri)
+    host = (parts.hostname or "").lower()
+    if parts.username or parts.password:
+        return "redirect URI must not contain credentials"
+    if host in _LOOPBACK_HOSTS:
+        return None if parts.scheme in {"http", "https"} else f"scheme {parts.scheme!r} not allowed"
+    if parts.scheme != "https":
+        return f"redirect URI must use https (got {parts.scheme!r})"
+    if host not in {h.lower() for h in allowed_hosts}:
+        return f"redirect host {host!r} is not on this server's allowlist"
+    return None
 
 
 class StoredAccessToken(AccessToken):
@@ -60,9 +93,15 @@ class CalibreWebOAuthProvider:
     swap the dicts for a SQLite-backed store.
     """
 
-    def __init__(self, cw_url: str, issuer_url: str = "") -> None:
+    def __init__(
+        self,
+        cw_url: str,
+        issuer_url: str = "",
+        allowed_redirect_hosts: Iterable[str] = DEFAULT_ALLOWED_REDIRECT_HOSTS,
+    ) -> None:
         self.cw_url = cw_url
         self.issuer_url = issuer_url
+        self.allowed_redirect_hosts = tuple(allowed_redirect_hosts)
 
         self._clients: dict[str, OAuthClientInformationFull] = {}
         self._pending_auths: dict[str, PendingAuth] = {}
@@ -78,6 +117,9 @@ class CalibreWebOAuthProvider:
         return self._clients.get(client_id)
 
     async def register_client(self, client_info: OAuthClientInformationFull) -> None:
+        for uri in client_info.redirect_uris or []:
+            if (why := redirect_uri_problem(str(uri), self.allowed_redirect_hosts)) is not None:
+                raise RegistrationError(error="invalid_redirect_uri", error_description=f"{uri}: {why}")
         if client_info.client_id:
             self._clients[client_info.client_id] = client_info
 
@@ -95,14 +137,27 @@ class CalibreWebOAuthProvider:
         )
         return f"{self.issuer_url}/auth/login?code_id={code}"
 
+    def describe_pending(self, code_id: str) -> tuple[str, str] | None:
+        """``(client_name, redirect_host)`` for the login page, or None if unknown/expired."""
+        pending = self._pending_auths.get(code_id)
+        if pending is None or time.time() - pending.created_at > 600:
+            return None
+        host = urlsplit(str(pending.params.redirect_uri)).hostname or ""
+        return pending.client.client_name or "", host
+
     async def complete_authorization(
         self, code_id: str, username: str, password: str
     ) -> str:
-        """Called by the login form. Validate credentials against Calibre-Web."""
-        pending = self._pending_auths.pop(code_id, None)
+        """Called by the login form. Validate credentials against Calibre-Web.
+
+        The pending request is consumed only on success, so a mistyped
+        password can be retried from the same page.
+        """
+        pending = self._pending_auths.get(code_id)
         if not pending:
             raise ValueError("Invalid or expired authorization request")
         if time.time() - pending.created_at > 600:
+            self._pending_auths.pop(code_id, None)
             raise ValueError("Authorization request expired")
 
         # Validate credentials against Calibre-Web. login() raises on failure.
@@ -118,6 +173,8 @@ class CalibreWebOAuthProvider:
         finally:
             client.close()
 
+        if self._pending_auths.pop(code_id, None) is None:
+            raise ValueError("Invalid or expired authorization request")  # consumed by a concurrent submit
         auth_code = AuthorizationCode(
             code=pending.code,
             scopes=pending.params.scopes or [],
@@ -295,6 +352,11 @@ LOGIN_PAGE_TEMPLATE = """<!DOCTYPE html>
             cursor: pointer; font-weight: 600;
         }
         button:hover { background: #3b75c4; }
+        .requester {
+            background: #0f3460; border-radius: 6px; padding: 0.7rem;
+            margin-bottom: 1rem; font-size: 0.85rem; color: #ccc; line-height: 1.4;
+        }
+        .requester strong { color: #fff; }
         .error {
             background: #3d1a1a; border: 1px solid #e94560; border-radius: 6px;
             padding: 0.7rem; margin-bottom: 1rem; font-size: 0.85rem; color: #ff8a8a;
@@ -305,6 +367,7 @@ LOGIN_PAGE_TEMPLATE = """<!DOCTYPE html>
     <div class="card">
         <h1>Calibre Library</h1>
         <p class="subtitle">Sign in with your Calibre-Web credentials to connect Claude</p>
+        $requester
         $error
         <form method="POST" action="/auth/login">
             <input type="hidden" name="code_id" value="$code_id">

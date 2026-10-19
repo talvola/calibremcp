@@ -22,7 +22,7 @@ import socket
 import sys
 from pathlib import Path
 from typing import Any
-from urllib.parse import urlsplit
+from urllib.parse import urljoin, urlsplit
 
 from mcp.server.fastmcp import FastMCP
 
@@ -489,49 +489,39 @@ def _resolve_author_sort(value: str, check: AuthorSortCheck | None) -> tuple[str
 
 @mcp.tool()
 def calibre_set_cover_from_url(book_id: int, cover_url: str) -> str:
-    """Replace the cover by giving Calibre-Web a URL to fetch.
+    """Replace the cover with an image fetched from a public URL.
 
-    We pre-resolve cross-domain redirects (e.g. covers.openlibrary.org ->
-    archive.org's view_archive.php) because Calibre-Web's server-side
-    downloader doesn't follow them — passing the original redirecting URL
-    results in no cover being stored, silently. We do a HEAD/GET with
-    follow_redirects, hand Calibre-Web the final resolved URL, then probe
-    the stored cover and report the actual byte count so the caller can
-    verify the change took.
+    The MCP server downloads the image itself and uploads the bytes through
+    Calibre-Web's edit form; Calibre-Web never fetches the URL. Redirects
+    (e.g. covers.openlibrary.org -> archive.org) are followed hop by hop,
+    and every hop must resolve only to public addresses; the connection is
+    pinned to the address that was checked, so DNS can't swap in a LAN host
+    between check and fetch. Accepts JPEG/PNG/WebP up to 15 MB. Afterwards
+    the stored cover is probed and its byte count reported so the caller
+    can verify the change took.
     """
     import httpx as _httpx
 
-    if (why := _reject_non_public_url(cover_url)) is not None:
-        return f"Refusing to fetch {cover_url}: {why}"
-
-    resolved = cover_url
     try:
-        with _httpx.Client(follow_redirects=True, timeout=10.0) as c:
-            r = c.get(cover_url)
-            if (why := _reject_non_public_url(str(r.url))) is not None:
-                return f"Refusing cover URL that redirected to {r.url}: {why}"
-            if r.status_code >= 400:
-                return f"Could not fetch {cover_url}: HTTP {r.status_code}"
-            content_type = r.headers.get("content-type", "")
-            if not content_type.startswith("image/"):
-                return f"URL did not return an image (content-type: {content_type!r})."
-            resolved = str(r.url)
+        blob, mime, final_url = _fetch_public_image(cover_url)
+    except ValueError as e:
+        return f"Refusing cover URL {cover_url}: {e}"
     except _httpx.HTTPError as e:
-        return f"Could not pre-resolve cover URL: {e}"
+        return f"Could not fetch {cover_url}: {e}"
 
     cw = get_calibre_web()
-    cw.edit_book(book_id, {"cover_url": resolved})
+    cw.edit_book(book_id, {}, cover_file=(f"cover.{_COVER_MIME_EXT[mime]}", blob, mime))
 
     # Verify the cover changed by re-fetching it. Calibre-Web serves a small
     # placeholder when no real cover exists, so we report size for sanity-
     # checking. Any sub-2KB response is almost certainly the placeholder.
     try:
-        blob, _ = cw.get_cover_bytes(book_id)
-        size = len(blob)
+        stored, _ = cw.get_cover_bytes(book_id)
+        size = len(stored)
     except Exception:  # noqa: BLE001
         size = -1
 
-    note = f"Set cover for book {book_id} (resolved URL: {resolved})."
+    note = f"Set cover for book {book_id} from {final_url} ({len(blob):,} bytes, {mime})."
     if size >= 0:
         note += f" Calibre-Web now serves a {size:,}-byte cover."
         if size < 2048:
@@ -586,32 +576,99 @@ def calibre_view_cover(book_id: int) -> str:
     return f"Book {book_id} cover: {size:,} bytes, {mime}"
 
 
-def _reject_non_public_url(url: str) -> str | None:
-    """Return a reason string if ``url`` must not be fetched server-side, else None.
+_COVER_MIME_EXT = {"image/jpeg": "jpg", "image/jpg": "jpg", "image/png": "png", "image/webp": "webp"}
+_COVER_MAX_BYTES = 15 * 1024 * 1024
+_COVER_MAX_REDIRECTS = 5
+
+
+def _resolve_public_url(url: str) -> str:
+    """Return a public IP for ``url``'s host, or raise ``ValueError(reason)``.
 
     The MCP server runs with host networking on the NAS, so an arbitrary URL
     fetch could reach Portainer, Calibre-Web's admin, or anything else on the
     LAN. Cover sources are public CDNs (OpenLibrary, archive.org, Amazon), so
     we only allow http(s) to hosts that resolve exclusively to public
-    addresses. Checked on the caller's URL and again on the redirect target.
+    addresses. The returned IP is the one the caller must connect to.
     """
     parts = urlsplit(url)
     if parts.scheme not in {"http", "https"}:
-        return f"scheme {parts.scheme!r} not allowed"
+        raise ValueError(f"scheme {parts.scheme!r} not allowed")
     host = parts.hostname
     if not host:
-        return "no host in URL"
+        raise ValueError("no host in URL")
+    if parts.username or parts.password:
+        raise ValueError("credentials in URL not allowed")
     try:
         infos = socket.getaddrinfo(
             host, parts.port or (443 if parts.scheme == "https" else 80), proto=socket.IPPROTO_TCP
         )
     except socket.gaierror as e:
-        return f"cannot resolve host: {e}"
-    for info in infos:
-        ip = ipaddress.ip_address(info[4][0])
+        raise ValueError(f"cannot resolve host: {e}") from None
+    ips = [ipaddress.ip_address(info[4][0]) for info in infos]
+    if not ips:
+        raise ValueError("host resolved to no addresses")
+    for ip in ips:
         if not ip.is_global:
-            return f"host resolves to non-public address {ip}"
+            raise ValueError(f"host resolves to non-public address {ip}")
+    return str(ips[0])
+
+
+def _reject_non_public_url(url: str) -> str | None:
+    """Return a reason string if ``url`` must not be fetched server-side, else None."""
+    try:
+        _resolve_public_url(url)
+    except ValueError as e:
+        return str(e)
     return None
+
+
+def _fetch_public_image(url: str, *, transport: Any = None) -> tuple[bytes, str, str]:
+    """Download a cover image from a public URL. Returns ``(bytes, mime, final_url)``.
+
+    Redirects are followed by hand so each hop is checked before we connect
+    to it, and each request goes to the IP :func:`_resolve_public_url`
+    validated (Host header and TLS SNI/certificate check still use the real
+    hostname). Raises ``ValueError`` for anything we refuse; network errors
+    surface as ``httpx.HTTPError``. ``transport`` is for tests.
+    """
+    import httpx as _httpx
+
+    current = url
+    with _httpx.Client(follow_redirects=False, timeout=10.0, trust_env=False, transport=transport) as c:
+        for _ in range(_COVER_MAX_REDIRECTS + 1):
+            ip = _resolve_public_url(current)
+            parts = urlsplit(current)
+            ip_host = f"[{ip}]" if ":" in ip else ip
+            port = f":{parts.port}" if parts.port else ""
+            pinned = parts._replace(netloc=f"{ip_host}{port}").geturl()
+            extensions = {"sni_hostname": parts.hostname} if parts.scheme == "https" else {}
+            request = c.build_request("GET", pinned, headers={"Host": f"{parts.hostname}{port}"}, extensions=extensions)
+            r = c.send(request, stream=True)
+            try:
+                if r.is_redirect:
+                    location = r.headers.get("location")
+                    if not location:
+                        raise ValueError(f"HTTP {r.status_code} redirect without a Location header")
+                    current = urljoin(current, location)
+                    continue
+                if r.status_code >= 400:
+                    raise ValueError(f"HTTP {r.status_code}")
+                mime = r.headers.get("content-type", "").split(";")[0].strip().lower()
+                if mime not in _COVER_MIME_EXT:
+                    raise ValueError(f"not a JPEG/PNG/WebP image (content-type: {mime or 'none'!r})")
+                chunks: list[bytes] = []
+                total = 0
+                for chunk in r.iter_bytes():
+                    total += len(chunk)
+                    if total > _COVER_MAX_BYTES:
+                        raise ValueError(f"image larger than {_COVER_MAX_BYTES // (1024 * 1024)} MB")
+                    chunks.append(chunk)
+                if total == 0:
+                    raise ValueError("empty response")
+                return b"".join(chunks), ("image/jpeg" if mime == "image/jpg" else mime), current
+            finally:
+                r.close()
+    raise ValueError(f"more than {_COVER_MAX_REDIRECTS} redirects")
 
 
 def _normalize_authors(authors: str) -> str:
@@ -777,7 +834,7 @@ def _setup_http_auth() -> None:
     from starlette.requests import Request
     from starlette.responses import HTMLResponse, RedirectResponse
 
-    from .auth import LOGIN_PAGE_TEMPLATE, CalibreWebOAuthProvider
+    from .auth import DEFAULT_ALLOWED_REDIRECT_HOSTS, LOGIN_PAGE_TEMPLATE, CalibreWebOAuthProvider
 
     cw_url = os.environ.get("CALIBRE_WEB_URL")
     if not cw_url:
@@ -786,9 +843,15 @@ def _setup_http_auth() -> None:
 
     issuer_url = os.environ.get("MCP_ISSUER_URL", "http://localhost:8101")
 
+    # Comma-separated https redirect hosts OAuth clients may register
+    # (loopback is always allowed). Defaults to Claude's callback hosts.
+    allowed_hosts_env = os.environ.get("MCP_ALLOWED_REDIRECT_HOSTS", "")
+    allowed_hosts = [h.strip() for h in allowed_hosts_env.split(",") if h.strip()]
+
     _oauth_provider = CalibreWebOAuthProvider(
         cw_url=cw_url,
         issuer_url=issuer_url,
+        allowed_redirect_hosts=allowed_hosts or DEFAULT_ALLOWED_REDIRECT_HOSTS,
     )
 
     mcp.settings.auth = AuthSettings(
@@ -892,18 +955,36 @@ def _setup_http_auth() -> None:
 
     # --- Login page (GET + POST) ---
 
-    @mcp.custom_route("/auth/login", methods=["GET"])
-    async def login_page(request: Request):
+    def _render_login(code_id: str, error: str = "", status_code: int = 200) -> HTMLResponse:
         from string import Template
 
-        code_id = request.query_params.get("code_id", "")
-        html = Template(LOGIN_PAGE_TEMPLATE).safe_substitute(code_id=_html.escape(code_id, quote=True), error="")
-        return HTMLResponse(html)
+        pending = _oauth_provider.describe_pending(code_id)
+        if pending is None:
+            requester = ""
+            error = error or "This sign-in link is invalid or has expired. Start the connection again from Claude."
+            status_code = max(status_code, 400)
+        else:
+            client_name, redirect_host = pending
+            requester = (
+                f'<p class="requester"><strong>{_html.escape(client_name or "An unnamed app")}</strong> '
+                f"is asking for access to your library. After you sign in you will be sent to "
+                f"<strong>{_html.escape(redirect_host)}</strong>. Only continue if you started this.</p>"
+            )
+        # Escape everything: code_id is attacker-controllable via the URL, the
+        # client name comes from open registration, and the error text can
+        # echo Calibre-Web's flash message.
+        error_html = f'<div class="error">{_html.escape(error)}</div>' if error else ""
+        html = Template(LOGIN_PAGE_TEMPLATE).safe_substitute(
+            code_id=_html.escape(code_id, quote=True), requester=requester, error=error_html
+        )
+        return HTMLResponse(html, status_code=status_code)
+
+    @mcp.custom_route("/auth/login", methods=["GET"])
+    async def login_page(request: Request):
+        return _render_login(request.query_params.get("code_id", ""))
 
     @mcp.custom_route("/auth/login", methods=["POST"])
     async def login_submit(request: Request):
-        from string import Template
-
         form = await request.form()
         code_id = str(form.get("code_id", ""))
         username = str(form.get("username", ""))
@@ -913,13 +994,7 @@ def _setup_http_auth() -> None:
             redirect_url = await _oauth_provider.complete_authorization(code_id, username, password)
             return RedirectResponse(url=redirect_url, status_code=302)
         except ValueError as e:
-            # Escape both: code_id is attacker-controllable via the URL, and the
-            # error text can echo Calibre-Web's flash message.
-            error_html = f'<div class="error">{_html.escape(str(e))}</div>'
-            html = Template(LOGIN_PAGE_TEMPLATE).safe_substitute(
-                code_id=_html.escape(code_id, quote=True), error=error_html
-            )
-            return HTMLResponse(html, status_code=400)
+            return _render_login(code_id, str(e), status_code=400)
 
 
 if __name__ == "__main__":
